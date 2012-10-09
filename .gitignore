@@ -8,5 +8,4 @@ Makefile.in
 /aclocal.m4
 /compile
 /depcomp
-/install-sh
 /missing

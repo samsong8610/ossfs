@@ -1,0 +1,7 @@
+[BUGS]
+Can't make a file and a directory using the same name in a directory.
+
+[FEATURES]
+Multi-part upload oss API.
+Optimise directory sync using ETAG.
+Retry after non-fatal connection errors, such as timeout, DNS resolving error etc.

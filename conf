@@ -1,0 +1,34 @@
+# Common configuration
+[common]
+# Set bucket is public or not.
+# TRUE for public, otherwise FALSE.
+# Default: FALSE
+#
+#public=FALSE
+
+# Service configuration
+[service]
+
+# Set host address.
+# The address can be the internet or intranet address.
+# Default: http://storage.aliyun.com
+#
+host=http://storage.aliyun.com
+#host=http://storage-vm.aliyun-inc.com
+
+# Set service port.
+# Default: 80
+#
+port=80
+
+# Set access id.
+# If the bucket is public, leave access id empty, otherwise access id must be set.
+# Default: 
+#
+accessid=3z4om38nk29w60axe69khvqg
+
+# Set access key.
+# If the bucket is public, leave access key empty, otherwise access key must be set.
+# Default:
+#
+accesskey=OJWbkW+U5ohhQ/rxYoDKojkqkZE=

@@ -14,6 +14,7 @@
 #define OSS_OBJECT_KEY_MIN      1
 #define OSS_OBJECT_KEY_MAX      1023
 
+#define OSS_CONFIG_SCHEME       "scheme"
 #define OSS_CONFIG_HOST         "host"
 #define OSS_CONFIG_PORT         "port"
 #define OSS_CONFIG_ACCESSID     "accessid"
@@ -48,7 +49,7 @@ typedef enum {
   OSS_ERROR_MISSING_CONTENT_LENGTH,
   OSS_ERROR_NO_SUCH_BUCKET,
   OSS_ERROR_NO_SUCH_KEY,
-  OSS_ERROR_Upload,
+  OSS_ERROR_UPLOAD,
   OSS_ERROR_NOT_IMPLEMENTED,
   OSS_ERROR_PRECONDITION_FAILED,
   OSS_ERROR_REQUEST_TIME_TOO_SKEWED,
@@ -58,8 +59,10 @@ typedef enum {
 } OssErrors;
 
 typedef struct {
-  const gchar *base_address;
+  const gchar *scheme;
+  const gchar *host;
   gint port;
+  const gchar *bucket;
   gboolean is_public;
   const gchar *access_id;
   const gchar *access_key;
@@ -111,7 +114,7 @@ typedef struct {
   GSList *common_prefixes;
 } OssListBucketResult;
 
-OssService* oss_service_new(GHashTable *conf);
+OssService* oss_service_new(const gchar *bucket, GHashTable *conf);
 void oss_service_destroy(OssService *service);
 OssBucket* oss_bucket_new(const gchar *name, const gchar *acl);
 void oss_bucket_destroy(OssBucket *bucket);
@@ -129,10 +132,10 @@ OssBucket* oss_bucket_get_acl(OssService *service, const gchar *bucket, GError *
 gint oss_bucket_delete(OssService *service, const gchar *bucket, GError **error);
 void oss_bucket_get_destroy(OssListBucketResult *list);
 
-gint oss_object_put(OssService *service, const gchar *bucket, OssObject *object, GError **error);
-gint oss_object_get(OssService *service, const gchar *bucket, OssObject *object, GError **error);
-gint oss_object_copy(OssService *service, const gchar *bucket, OssObject *object, OssObject *src, GError **error);
-gint oss_object_head(OssService *service, const gchar *bucket, OssObject *object, GError **error);
-gint oss_object_delete(OssService *service, const gchar *bucket, const gchar *object, GError **error);
-gint oss_object_delete_multiple(OssService *service, const gchar *bucket, gboolean quiet, GError **error, ...);
+gint oss_object_put(OssService *service, OssObject *object, GError **error);
+gint oss_object_get(OssService *service, OssObject *object, GError **error);
+gint oss_object_copy(OssService *service, OssObject *object, const gchar *src_bucket, OssObject *src, GError **error);
+gint oss_object_head(OssService *service, OssObject *object, GError **error);
+gint oss_object_delete(OssService *service, const gchar *object, GError **error);
+gint oss_object_delete_multiple(OssService *service, gboolean quiet, GError **error, ...);
 #endif /* OSS_H */

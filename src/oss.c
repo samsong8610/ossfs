@@ -17,17 +17,23 @@ static OssError* process_error(FILE *f);
 static OssListBucketResult* process_list_bucket_result(FILE *f);
 static HttpClient* get_or_create_client(OssService *service);
 static OssBucket* process_access_control_policy(FILE *f);
-static const gchar* get_canonical_resource(const gchar *bucket, OssObject *object);
+static const gchar* get_canonical_resource(OssObject *object);
 static void process_copy_object_result(FILE *f, OssObject *object);
 
-OssService *oss_service_new(GHashTable *conf)
+OssService *oss_service_new(const gchar *bucket, GHashTable *conf)
 {
-  OssService *result = g_new0(OssService, 1);
+  OssService *result;
   gpointer value;
 
+  result = g_new0(OssService, 1);
+  result->bucket = bucket;
+
   if (conf) {
+    if (value = g_hash_table_lookup(conf, OSS_CONFIG_SCHEME)) {
+      result->scheme = (const gchar*)value;
+    }
     if (value = g_hash_table_lookup(conf, OSS_CONFIG_HOST)) {
-      result->base_address = (const gchar*)value;
+      result->host = (const gchar*)value;
     }
     if (value = g_hash_table_lookup(conf, OSS_CONFIG_PORT)) {
       result->port = (gint)g_ascii_strtoull((gchar*)value, NULL, 10);
@@ -47,8 +53,12 @@ OssService *oss_service_new(GHashTable *conf)
       result->access_key = (const gchar*)value;
     }
   }
-  if (result->base_address == NULL) {
-    result->base_address = "http://storage.aliyun.com";
+
+  if (result->scheme == NULL) {
+    result->scheme = "http";
+  }
+  if (result->host == NULL) {
+    result->host = "oss.aliyuncs.com";
   }
   if (result->port == 0) {
     result->port = 80;
@@ -60,17 +70,15 @@ OssService *oss_service_new(GHashTable *conf)
     result->access_key = "OJWbkW+U5ohhQ/rxYoDKojkqkZE=";
   }
   result->sha1 = EVP_sha1();
-  HttpClient *client = http_client_new(result->base_address, result->port);
-  result->client = client;
+
+  result->client = NULL;
 
   return result;
 }
 
 void oss_service_destroy(OssService *service)
 {
-  if (service == NULL) {
-    return ;
-  }
+  g_return_if_fail(service != NULL);
 
   if (service->client) {
     http_client_destroy((HttpClient*)service->client);
@@ -208,7 +216,7 @@ GSList *oss_service_get(OssService *service, GError **error)
   HttpClient *client;
 
   g_return_val_if_fail(error == NULL || *error == NULL, NULL);
-  g_return_val_if_fail(service != NULL && service->base_address != NULL, NULL);
+  g_return_val_if_fail(service != NULL && service->host != NULL, NULL);
   client = get_or_create_client(service);
 
   GHashTable *header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
@@ -238,7 +246,6 @@ GSList *oss_service_get(OssService *service, GError **error)
 
   g_hash_table_destroy(header);
   g_hash_table_destroy(resp_header);
-  fclose(f);
   return result;
 }
 
@@ -293,12 +300,12 @@ gint oss_bucket_put(OssService *service, OssBucket *bucket, GError **error)
   g_return_val_if_fail(error == NULL || *error == NULL, -1);
 
   len = strlen(bucket->name);
-  if (len < 3 || len > 255) {
-    g_set_error_literal(error, OSS_ERROR, OSS_ERROR_INVALID_BUCKET_NAME, "Bucket name length must be between 3 and 255 characters.");
+  if (len < 3 || len > 63) {
+    g_set_error_literal(error, OSS_ERROR, OSS_ERROR_INVALID_BUCKET_NAME, "Bucket name length must be between 3 and 63 characters.");
     return -1;
   }
    
-  regex = g_regex_new("^[a-z0-9]+[a-z0-9_\\-]*$", 0, 0, NULL);
+  regex = g_regex_new("^[a-z0-9][a-z0-9\\-]*$", 0, 0, NULL);
   g_regex_match(regex, (const gchar*)bucket->name, 0, &match_info);
   if (!g_match_info_matches(match_info)) {
     g_match_info_free(match_info);
@@ -309,10 +316,10 @@ gint oss_bucket_put(OssService *service, OssBucket *bucket, GError **error)
   g_match_info_free(match_info);
   g_regex_unref(regex);
 
+  service->bucket = bucket->name;
   client = get_or_create_client(service);
 
   res = g_string_new("/");
-  g_string_append(res, bucket->name);
 
   GHashTable *header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
   GHashTable *resp_header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
@@ -487,14 +494,9 @@ OssBucket* oss_bucket_get_acl(OssService *service, const gchar *bucket, GError *
 
   g_return_val_if_fail(error == NULL || *error == NULL, NULL);
 
+  service->bucket = bucket;
   client = get_or_create_client(service);
-  if (g_str_has_prefix(bucket, "/")) {
-    res = g_string_new(bucket);
-  } else {
-    res = g_string_new("/");
-    g_string_append(res, bucket);
-  }
-  g_string_append(res, "?acl");
+  res = g_string_new("/?acl");
 
   header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
   resp_header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
@@ -542,14 +544,10 @@ gint oss_bucket_delete(OssService *service, const gchar *bucket, GError **error)
 
   g_return_val_if_fail(error == NULL || *error == NULL, -1);
 
+  service->bucket = bucket;
   client = get_or_create_client(service);
-  if (g_str_has_prefix(bucket, "/")) {
-    res = g_string_new(bucket);
-  } else {
-    res = g_string_new("/");
-    g_string_append(res, bucket);
-  }
-
+  res = g_string_new("/");
+  
   header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
   resp_header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
   gchar *date = get_current_date_time_gmt();
@@ -604,7 +602,7 @@ gint oss_bucket_delete(OssService *service, const gchar *bucket, GError **error)
   return 0;
 }
 
-gint oss_object_put(OssService *service, const gchar *bucket, OssObject *object, GError **error)
+gint oss_object_put(OssService *service, OssObject *object, GError **error)
 {
   int len;
   HttpClient *client;
@@ -625,7 +623,7 @@ gint oss_object_put(OssService *service, const gchar *bucket, OssObject *object,
    
   client = get_or_create_client(service);
 
-  res = get_canonical_resource(bucket, object);
+  res = get_canonical_resource(object);
 
   GHashTable *header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
   GHashTable *resp_header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
@@ -681,7 +679,7 @@ gint oss_object_put(OssService *service, const gchar *bucket, OssObject *object,
   return 0;
 }
 
-gint oss_object_get(OssService *service, const gchar *bucket, OssObject *object, GError **error)
+gint oss_object_get(OssService *service, OssObject *object, GError **error)
 {
   HttpClient *client;
   const gchar *res;
@@ -702,7 +700,7 @@ gint oss_object_get(OssService *service, const gchar *bucket, OssObject *object,
 
   client = get_or_create_client(service);
 
-  res = get_canonical_resource(bucket, object);
+  res = get_canonical_resource(object);
 
   GHashTable *header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
   GHashTable *resp_header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
@@ -783,7 +781,7 @@ gint oss_object_get(OssService *service, const gchar *bucket, OssObject *object,
   return 0;
 }
 
-gint oss_object_copy(OssService *service, const gchar *bucket, OssObject *object, OssObject *src, GError **error)
+gint oss_object_copy(OssService *service, OssObject *object, const gchar *src_bucket, OssObject *src, GError **error)
 {
   int len;
   HttpClient *client;
@@ -792,6 +790,7 @@ gint oss_object_copy(OssService *service, const gchar *bucket, OssObject *object
   OssError *err;
   GHashTableIter iter;
   gpointer key, value;
+  GString *copy_src;
 
   g_return_val_if_fail(object != NULL && object->key != NULL, -1);
   g_return_val_if_fail(error == NULL || *error == NULL, -1);
@@ -804,7 +803,7 @@ gint oss_object_copy(OssService *service, const gchar *bucket, OssObject *object
    
   client = get_or_create_client(service);
 
-  res = get_canonical_resource(bucket, object);
+  res = get_canonical_resource(object);
 
   GHashTable *header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
   GHashTable *resp_header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
@@ -824,7 +823,15 @@ gint oss_object_copy(OssService *service, const gchar *bucket, OssObject *object
   if (src == NULL) {
     g_hash_table_insert(header, g_strdup("x-oss-copy-source"), g_strdup(res));
   } else {
-    g_hash_table_insert(header, g_strdup("x-oss-copy-source"), (gpointer)get_canonical_resource(bucket, src));
+    if (g_str_has_prefix(src_bucket, "/")) {
+      copy_src = g_string_new(src_bucket);
+    } else {
+      copy_src = g_string_new("/");
+      g_string_append(copy_src, src_bucket);
+    }
+    g_string_append(copy_src, get_canonical_resource(src));
+    g_hash_table_insert(header, g_strdup("x-oss-copy-source"), (gpointer)copy_src->str);
+    g_string_free(copy_src, FALSE);
     if (src->meta != NULL && g_hash_table_size(src->meta)) {
       g_hash_table_iter_init(&iter, src->meta);
       while (g_hash_table_iter_next(&iter, &key, &value)) {
@@ -873,7 +880,7 @@ gint oss_object_copy(OssService *service, const gchar *bucket, OssObject *object
   return 0;
 }
 
-gint oss_object_head(OssService *service, const gchar *bucket, OssObject *object, GError **error)
+gint oss_object_head(OssService *service, OssObject *object, GError **error)
 {
   HttpClient *client;
   const gchar *res;
@@ -897,7 +904,7 @@ gint oss_object_head(OssService *service, const gchar *bucket, OssObject *object
 
   client = get_or_create_client(service);
 
-  res = get_canonical_resource(bucket, object);
+  res = get_canonical_resource(object);
 
   GHashTable *header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
   GHashTable *resp_header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
@@ -961,7 +968,7 @@ gint oss_object_head(OssService *service, const gchar *bucket, OssObject *object
   return 0;
 }
 
-gint oss_object_delete(OssService *service, const gchar *bucket, const gchar *object,  GError **error)
+gint oss_object_delete(OssService *service, const gchar *object,  GError **error)
 {
   HttpClient *client;
   const gchar *res;
@@ -983,7 +990,7 @@ gint oss_object_delete(OssService *service, const gchar *bucket, const gchar *ob
 
   tmp = g_new(OssObject, 1);
   tmp->key = (gchar*)object;
-  res = get_canonical_resource(bucket, tmp);
+  res = get_canonical_resource(tmp);
   g_free(tmp);
   tmp = NULL;
 
@@ -1024,7 +1031,7 @@ gint oss_object_delete(OssService *service, const gchar *bucket, const gchar *ob
   return 0;
 }
 
-gint oss_object_delete_multiple(OssService *service, const gchar *bucket, gboolean quiet, GError **error, ...)
+gint oss_object_delete_multiple(OssService *service, gboolean quiet, GError **error, ...)
 {
   va_list ap;
   const gchar *object;
@@ -1039,15 +1046,7 @@ gint oss_object_delete_multiple(OssService *service, const gchar *bucket, gboole
 
   g_return_val_if_fail(error == NULL || *error == NULL, -1);
 
-  if (g_str_has_prefix(bucket, "/")) {
-    buf = g_string_new(bucket);
-  } else {
-    buf = g_string_new("/");
-    g_string_append(buf, bucket);
-  }
-  g_string_append(buf, "?delete");
-  res = buf->str;
-  g_string_free(buf, FALSE);
+  res = "/?delete";
 
   fpost = tmpfile();
   if (fpost == NULL) {
@@ -1228,6 +1227,14 @@ static gchar *sign(const OssService *service, const gchar *method, const gchar *
     }
 
     g_slist_free(canon_headers);
+  }
+
+  if (service->bucket) {
+    g_string_append_c(buf, '/');
+    g_string_append(buf, service->bucket);
+  }
+  if (!g_str_has_prefix(resource, "/")) {
+    g_string_append_c(buf, '/');
   }
 
   pos = strchr(resource, (int)'?');
@@ -1575,11 +1582,27 @@ static OssListBucketResult* process_list_bucket_result(FILE *f)
 static HttpClient* get_or_create_client(OssService *service)
 {
   HttpClient *client = NULL;
-  const gchar *address;
+  GString *address;
+
+  address = g_string_sized_new(128);
+  g_string_append(address, service->scheme);
+  g_string_append(address, "://");
+  if (service->bucket != NULL) {
+    g_string_append(address, service->bucket);
+    g_string_append_c(address, '.');
+  }
+  g_string_append(address, service->host);
 
   if (service->client == NULL) {
-    if (service->base_address) address = service->base_address;
-    client = http_client_new(address, service->port);
+    client = http_client_new(address->str, service->port);
+    if (client == NULL) {
+      g_print("Initialize http client failed: %s\n", g_strerror(errno));
+      exit(-1);
+    }
+    service->client = client;
+  } else if (g_strcmp0(service->client->host, address->str) != 0) {
+    http_client_destroy(service->client);
+    client = http_client_new(address->str, service->port);
     if (client == NULL) {
       g_print("Initialize http client failed: %s\n", g_strerror(errno));
       exit(-1);
@@ -1588,6 +1611,7 @@ static HttpClient* get_or_create_client(OssService *service)
   } else {
     client = service->client;
   }
+  g_string_free(address, FALSE);
   return client;
 }
 
@@ -1658,7 +1682,7 @@ static OssBucket* process_access_control_policy(FILE *f)
   return result;
 }
 
-static const gchar* get_canonical_resource(const gchar *bucket, OssObject *object)
+static const gchar* get_canonical_resource(OssObject *object)
 {
   GString *res;
   const gchar *result;
@@ -1666,14 +1690,10 @@ static const gchar* get_canonical_resource(const gchar *bucket, OssObject *objec
   gpointer key, value;
   gboolean first = TRUE;
 
-  if (g_str_has_prefix(bucket, "/")) {
-    res = g_string_new(bucket);
+  if (g_str_has_prefix(object->key, "/")) {
+    res = g_string_new("");
   } else {
     res = g_string_new("/");
-    g_string_append(res, bucket);
-  }
-  if (!g_str_has_prefix(object->key, "/")) {
-    g_string_append_c(res, '/');
   }
   g_string_append(res, object->key);
 

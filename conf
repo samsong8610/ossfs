@@ -11,10 +11,14 @@
 
 # Set host address.
 # The address can be the internet or intranet address.
-# Default: http://storage.aliyun.com
+# Default: oss.aliyuncs.com
 #
-host=http://storage.aliyun.com
-#host=http://storage-vm.aliyun-inc.com
+host=oss.aliyuncs.com
+#host=oss-internal.aliyuncs.com
+
+# Set scheme
+# Default: http
+scheme=http
 
 # Set service port.
 # Default: 80

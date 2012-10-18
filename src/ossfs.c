@@ -78,7 +78,7 @@ static int ossfs_getattr(const char *path, struct stat *stbuf)
   if (!object) return -ENOMEM;
 
   error = NULL;
-  res = oss_object_head(service, bucket, object, &error);
+  res = oss_object_head(service, object, &error);
   if (res) {
     oss_object_destroy(object);
     switch (error->code) {
@@ -99,7 +99,7 @@ static int ossfs_getattr(const char *path, struct stat *stbuf)
       if (!object) return -ENOMEM;
 
       error = NULL;
-      res = oss_object_head(service, bucket, object, &error);
+      res = oss_object_head(service, object, &error);
       if (res) {
 	oss_object_destroy(object);
 	switch (error->code) {
@@ -205,7 +205,7 @@ static int ossfs_readlink(const char *path, char *buf, size_t size)
 	if (!object) return -ENOMEM;
 
 	error = NULL;
-	res = oss_object_get(service, bucket, object, &error);
+	res = oss_object_get(service, object, &error);
 	if (res) {
 	  if (error->code == OSS_ERROR_NO_SUCH_KEY) res = -ENOENT;
 	  else if (error->code == OSS_ERROR_INVALID_OBJECT_NAME) res = -ENAMETOOLONG;
@@ -244,7 +244,7 @@ static int ossfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
   query = g_string_sized_new(48);
   if (!query) return -ENOMEM;
 
-  g_string_append(query, bucket);
+  g_string_append(query, "/");
   if (g_strcmp0(path, "/")) {
     g_string_append(query, "?prefix=");
 
@@ -334,7 +334,7 @@ static int ossfs_mknod(const char *path, mode_t mode, dev_t rdev)
 
   g_hash_table_insert(object->meta, g_strdup(OSS_META_MODE), ltos((long)mode));
   error = NULL;
-  res = oss_object_put(service, bucket, object, &error);
+  res = oss_object_put(service, object, &error);
   if (res) {
     if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
     else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
@@ -370,7 +370,7 @@ static int ossfs_mkdir(const char *path, mode_t mode)
 
   g_hash_table_insert(object->meta, g_strdup(OSS_META_MODE), g_strdup(buf));
   error = NULL;
-  res = oss_object_put(service, bucket, object, &error);
+  res = oss_object_put(service, object, &error);
   if (res) {
     if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
     else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
@@ -392,7 +392,7 @@ static int ossfs_unlink(const char *path)
   GError *error;
 
   error = NULL;
-  res = oss_object_delete(service, bucket, path, &error);
+  res = oss_object_delete(service, path, &error);
   if (res) {
     if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
     else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
@@ -419,7 +419,7 @@ static int ossfs_rmdir(const char *path)
   query = g_string_sized_new(48);
   if (!query) return -ENOMEM;
 
-  g_string_append(query, bucket);
+  g_string_append(query, "/");
   g_string_append(query, "?prefix=");
   if (g_str_has_prefix(path, "/")) {
     len = g_strlcpy(prefix, path+1, PATH_MAX);
@@ -454,7 +454,7 @@ static int ossfs_rmdir(const char *path)
   oss_bucket_get_destroy(lbr);
 
   error = NULL;
-  res = oss_object_delete(service, bucket, prefix, &error);
+  res = oss_object_delete(service, prefix, &error);
   if (res) {
     if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
     else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
@@ -494,7 +494,7 @@ static int ossfs_symlink(const char *from, const char *to)
   rewind(f);
 
   error = NULL;
-  res = oss_object_put(service, bucket, object, &error);
+  res = oss_object_put(service, object, &error);
   if (res) {
     if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
     else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
@@ -552,7 +552,7 @@ static int ossfs_chmod(const char *path, mode_t mode)
   g_string_free(dir, TRUE);
   if (!object) return -ENOMEM;
   error = NULL;
-  res = oss_object_head(service, bucket, object, &error);
+  res = oss_object_head(service, object, &error);
   if (res) {
     oss_object_destroy(object);
     switch (error->code) {
@@ -565,7 +565,7 @@ static int ossfs_chmod(const char *path, mode_t mode)
   g_hash_table_insert(object->meta, g_strdup(OSS_META_MODE), ltos((long)mode));
    
   error = NULL;
-  res = oss_object_copy(service, bucket, object, object, &error);
+  res = oss_object_copy(service, object, bucket, object, &error);
   if (res) {
     if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
     else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
@@ -599,7 +599,7 @@ static int ossfs_truncate(const char *path, off_t size)
   if (!object) return -ENOMEM;
 
   error = NULL;
-  res = oss_object_get(service, bucket, object, &error);
+  res = oss_object_get(service, object, &error);
   if (res) {
     if (error->code == OSS_ERROR_NO_SUCH_KEY) res = -ENOENT;
     else if (error->code == OSS_ERROR_INVALID_OBJECT_NAME) res = -ENAMETOOLONG;
@@ -626,7 +626,7 @@ static int ossfs_truncate(const char *path, off_t size)
   }
   g_hash_table_insert(object->meta, g_strdup(OSS_META_MODE), ltos((long)stbuf.st_mode));
   error = NULL;
-  res = oss_object_put(service, bucket, object, &error);
+  res = oss_object_put(service, object, &error);
   if (res) {
     if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
     else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
@@ -661,7 +661,7 @@ static int ossfs_open(const char *path, struct fuse_file_info *fi)
   if (!object) return -ENOMEM;
 
   error = NULL;
-  res = oss_object_get(service, bucket, object, &error);
+  res = oss_object_get(service, object, &error);
   if (res) {
     if (error->code == OSS_ERROR_NO_SUCH_KEY) {
       if (fi->flags & O_CREAT) {
@@ -752,7 +752,7 @@ static int ossfs_release(const char *path, struct fuse_file_info *fi)
 
   object = (OssObject*)fi->fh;
   error = NULL;
-  res = oss_object_put(service, bucket, object, &error);
+  res = oss_object_put(service, object, &error);
   if (res) {
     if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
     else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
@@ -893,30 +893,7 @@ int main(int argc, char **argv)
   int i;
 
   /*
-  gchar *host = g_strdup("http://localhost");
-  HttpClient *client = http_client_new(host, 80);
-  if (client == NULL) {
-    g_print("Create http client failed: %s\n", g_strerror(errno));
-    g_free(host);
-    return -1;
-  }
-
-  GHashTable *header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)destroyer, (GDestroyNotify)destroyer);
-  GHashTable *resp_header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)destroyer, (GDestroyNotify)destroyer);
-
-  g_hash_table_insert(header, g_strdup("Date"), get_current_date_time_gmt());
-  if (http_client_head(client, "/", header, resp_header)) {
-    g_print("Request HEAD of path '/' failed: %s\n", g_strerror(errno));
-  }
-  g_hash_table_foreach(resp_header, (GHFunc)print_header, NULL);
-
-  if (http_client_get(client, "/", header, resp_header, NULL, NULL)) {
-    g_print("Request GET of path '/' failed: %s\n", g_strerror(errno));
-  }
-  
-  */
-  /*
-  service = oss_service_new(NULL);
+  service = oss_service_new(NULL, NULL);
   gint r;
   OssBucket *bucket;
   OssListBucketResult *list;
@@ -951,8 +928,9 @@ int main(int argc, char **argv)
   g_print("%s has %s privilege\n", bucket->name, bucket->acl);
   oss_bucket_destroy(bucket);
 
+  service->bucket = "307865669";
   error = NULL;
-  list = oss_bucket_get(service, "307865669?prefix=/&delimiter=/", &error);
+  list = oss_bucket_get(service, "/?prefix=/&delimiter=/", &error);
   if (list == NULL) {
     g_print("oss_bucket_get failed: %d (%s)\n", error->code, error->message);
     g_error_free(error);
@@ -964,7 +942,7 @@ int main(int argc, char **argv)
   object = oss_object_new_file("ossfs.c", "ossfs.c", "r");
   g_hash_table_insert(object->meta, g_strdup("x-oss-meta-uid"), g_strdup("sam"));
   error = NULL;
-  r = oss_object_put(service, "307865669", object, &error);
+  r = oss_object_put(service, object, &error);
   if (r) {
     g_print("oss_object_put failed: %d (%s)\n", error->code, error->message);
     g_error_free(error);
@@ -973,15 +951,15 @@ int main(int argc, char **argv)
   oss_object_destroy(object);
   object = NULL;
 
-  object = oss_object_new("huhu\\");
+  object = oss_object_new("huhu/");
   error = NULL;
-  r = oss_object_put(service, "307865669", object, &error);
+  r = oss_object_put(service, object, &error);
   oss_object_destroy(object);
   object = NULL;
 
   object = oss_object_new("ossfs.c");
   error = NULL;
-  r = oss_object_get(service, "307865669", object, &error);
+  r = oss_object_get(service, object, &error);
   if (r) {
     g_print("oss_object_get failed: %d (%s)\n", error->code, error->message);
     g_error_free(error);
@@ -993,7 +971,7 @@ int main(int argc, char **argv)
 
   copied = oss_object_new("ossfs.c.bak");
   error = NULL;
-  r = oss_object_copy(service, "307865669", copied, object, &error);
+  r = oss_object_copy(service, copied, "307865669", object, &error);
   if (r) {
     g_print("oss_object_copy failed: %d (%s)\n", error->code, error->message);
     g_error_free(error);
@@ -1001,7 +979,7 @@ int main(int argc, char **argv)
   }
   stat = oss_object_new("ossfs.c.bak");
   error = NULL;
-  r = oss_object_head(service, "307865669", stat, &error);
+  r = oss_object_head(service, stat, &error);
   if (r) {
     g_print("oss_object_head failed: %d (%s)\n", error->code, error->message);
     g_error_free(error);
@@ -1017,7 +995,7 @@ int main(int argc, char **argv)
   oss_object_destroy(stat);
 
   error = NULL;
-  r = oss_object_delete(service, "307865669", copied->key, &error);
+  r = oss_object_delete(service, copied->key, &error);
   if (r) {
     g_print("oss_object_delete failed: %d (%s)\n", error->code, error->message);
     g_error_free(error);
@@ -1028,20 +1006,12 @@ int main(int argc, char **argv)
   oss_object_destroy(object);
   object = NULL;
 
-  error = NULL;
-  r = oss_object_delete_multiple(service, "307865669", FALSE, &error, "ossfs.c", "haha/", NULL);
-  if (r) {
-    g_print("oss_object_delete_multiple failed: %d (%s)\n", error->code, error->message);
-    g_error_free(error);
-    error = NULL;
-  }
-
   if (buckets) {
     g_print("Got %d buckets.\n", g_slist_length(buckets));
   }
 
   oss_service_get_destroy(buckets);
-
+  return 0;
   */
 
   cache_init();
@@ -1085,7 +1055,7 @@ int main(int argc, char **argv)
     if (g_strcmp0(argv[i], "-b") && g_strcmp0(argv[i], "--bucket")) {
       fargv[fargc++] = argv[i];
     } else {
-      i++; /* escape bucket parameter */
+      i++; 
     }
   }
 
@@ -1115,6 +1085,9 @@ int main(int argc, char **argv)
   if (g_key_file_has_key(kf, "common", "public", NULL)) {
     g_hash_table_insert(conf, OSS_CONFIG_PUBLIC, g_key_file_get_value(kf, "common", "public", NULL));
   }
+  if (g_key_file_has_key(kf, "service", "scheme", NULL)) {
+    g_hash_table_insert(conf, OSS_CONFIG_SCHEME, g_key_file_get_value(kf, "service", "scheme", NULL));
+  }
   if (g_key_file_has_key(kf, "service", "host", NULL)) {
     g_hash_table_insert(conf, OSS_CONFIG_HOST, g_key_file_get_value(kf, "service", "host", NULL));
   }
@@ -1128,7 +1101,7 @@ int main(int argc, char **argv)
     g_hash_table_insert(conf, OSS_CONFIG_ACCESSKEY, g_key_file_get_value(kf, "service", "accesskey", NULL));
   }
 
-  service = oss_service_new(conf);
+  service = oss_service_new(bucket, conf);
 
   umask(0);
   return fuse_main(fargc, fargv, &ossfs_oper, NULL);
@@ -1206,7 +1179,7 @@ static int rename_object(const char *from, const char *to)
   g_hash_table_insert(dst->meta, g_strdup("x-oss-metadata-directive"), g_strdup("COPY"));
 
   error = NULL;
-  res = oss_object_copy(service, bucket, dst, src, &error);
+  res = oss_object_copy(service, dst, bucket, src, &error);
   if (res) {
     if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
     else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
@@ -1245,7 +1218,7 @@ static int rename_directory(const char *from, const char *to)
   query = g_string_sized_new(48);
   if (!query) return -ENOMEM;
 
-  g_string_append(query, bucket);
+  g_string_append(query, "/");
   g_string_append(query, "?prefix=");
   if (g_str_has_prefix(from, "/")) {
     len = g_strlcpy(prefix, from+1, PATH_MAX);

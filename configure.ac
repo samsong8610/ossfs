@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.67])
-AC_INIT([ossfs], [0.1], [samsong8610@gmail.com])
+AC_INIT([ossfs], [0.2], [samsong8610@gmail.com])
 AM_INIT_AUTOMAKE([foreign -Wall -Werror])
 AC_CONFIG_SRCDIR([src/http.c])
 AC_CONFIG_HEADERS([config.h])

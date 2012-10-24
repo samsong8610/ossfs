@@ -10,6 +10,18 @@ fuse >= 2.8.4
 libcurl >= 4
 glib-2.0 >= 2.24
 libxml-2.0 >= 2.7.8
+libssl >= 1.0.0
+
+pre-install
+===========
+Before install ossfs, you need install all dependencies first. The command or process to install them depends on linux distribution you are using, I only list some very popular distibutions.
+[Ubuntu/Debian]
+
+	$ sudo apt-get install <dependency name>
+
+[Fedora]
+
+	$ sudo yum -y install <dependency name>
 
 install
 =======

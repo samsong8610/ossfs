@@ -17,7 +17,7 @@ pre-install
 Before install ossfs, you need install all dependencies first. The command or process to install them depends on linux distribution you are using, I only list some very popular distibutions.
 [Ubuntu]
 
-	$ sudo apt-get install fuse libcurl3 glib2.0-dev glibxml2-dev libssl-dev
+	$ sudo apt-get install pkg-config fuse libcurl3 glib2.0-dev glibxml2-dev libssl-dev
 
 install
 =======

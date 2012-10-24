@@ -6,6 +6,9 @@
 /* Define to 1 if you have the <errno.h> header file. */
 #undef HAVE_ERRNO_H
 
+/* Define to 1 if you have the <fuse.h> header file. */
+#undef HAVE_FUSE_H
+
 /* Define to 1 if you have the <glib/gstdio.h> header file. */
 #undef HAVE_GLIB_GSTDIO_H
 

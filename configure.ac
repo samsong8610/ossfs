@@ -13,10 +13,10 @@ AC_PROG_CC
 # Checks for libraries.
 #AC_CHECK_LIB([glib-2.0], [g_hash_table_new], [GLIB=-lglib-2.0])
 #AC_SUBST([GLIB])
-PKG_CHECK_MODULES([DEPS], [fuse >= 2.8.4 libcurl >= 4 glib-2.0 >= 2.24 libxml-2.0 >= 2.7.8])
+#PKG_CHECK_MODULES([DEPS], [fuse >= 2.8.4 libcurl >= 4 glib-2.0 >= 2.24 libxml-2.0 >= 2.7.8])
 
 # Checks for header files.
-AC_CHECK_HEADERS([glib.h curl/curl.h])
+AC_CHECK_HEADERS([glib.h curl/curl.h errno.h sys/stat.h openssl/evp.h glib/gstdio.h openssl/hmac.h openssl/md5.h libxml/xmlreader.h])
 
 # Checks for typedefs, structures, and compiler characteristics.
 

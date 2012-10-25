@@ -43,7 +43,7 @@ static mode_t default_mode = 0755;
 static gchar *bucket = "sam-pub";
 
 static GHashTable *cache = NULL;
-static GMutex cache_lock;
+static GMutex *cache_lock;
 static void cache_init(void);
 static void cache_add(gpointer key, gpointer value);
 static void cache_remove(gpointer key);
@@ -60,8 +60,8 @@ static int ossfs_getattr(const char *path, struct stat *stbuf)
   GString *dir;
 
   memset(stbuf, 0, sizeof(struct stat));  
-  if (cache_contains(path)) {
-    st = cache_lookup(path);
+  if (cache_contains((gpointer)path)) {
+    st = cache_lookup((gpointer)path);
     memcpy(stbuf, st, sizeof(struct stat));
     return 0;
   }
@@ -403,7 +403,7 @@ static int ossfs_unlink(const char *path)
     return res;
   }
 
-  cache_remove(path);
+  cache_remove((gpointer)path);
   return 0;
 }
 
@@ -526,8 +526,8 @@ static int ossfs_rename(const char *from, const char *to)
     res = rename_object(from, to);
   }
 
-  cache_remove(from);
-  cache_remove(to);
+  cache_remove((gpointer)from);
+  cache_remove((gpointer)to);
   return res;
 }
 
@@ -892,6 +892,9 @@ int main(int argc, char **argv)
   char* fargv[10];
   int i;
 
+  setlocale(LC_ALL, "");
+
+
   /*
   service = oss_service_new(NULL, NULL);
   gint r;
@@ -951,7 +954,7 @@ int main(int argc, char **argv)
   oss_object_destroy(object);
   object = NULL;
 
-  object = oss_object_new("huhu/");
+  object = oss_object_new("haha/");
   error = NULL;
   r = oss_object_put(service, object, &error);
   oss_object_destroy(object);
@@ -1013,7 +1016,8 @@ int main(int argc, char **argv)
   oss_service_get_destroy(buckets);
   return 0;
   */
-
+ 
+  cache_lock = g_mutex_new();
   cache_init();
 
   static const struct option opts[] = {
@@ -1059,7 +1063,6 @@ int main(int argc, char **argv)
     }
   }
 
-  setlocale(LC_ALL, "");
   home = getenv("HOME");
   if (home == NULL) {
     g_error("get home directory failed");
@@ -1105,6 +1108,7 @@ int main(int argc, char **argv)
 
   umask(0);
   return fuse_main(fargc, fargv, &ossfs_oper, NULL);
+
  }
 
 static void print_header(gpointer key, gpointer value, gpointer user_data)
@@ -1292,15 +1296,15 @@ static void cache_init(void)
 
 static void cache_add(gpointer key, gpointer value)
 {
-  g_mutex_lock(&cache_lock);
+  g_mutex_lock(cache_lock);
   g_hash_table_insert(cache, key, value);
-  g_mutex_unlock(&cache_lock);
+  g_mutex_unlock(cache_lock);
 }
 static void cache_remove(gpointer key)
 {
-  g_mutex_lock(&cache_lock);
+  g_mutex_lock(cache_lock);
   g_hash_table_remove(cache, key);
-  g_mutex_unlock(&cache_lock);
+  g_mutex_unlock(cache_lock);
 }
 static gboolean cache_contains(gpointer key)
 {

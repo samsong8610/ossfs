@@ -4,10 +4,10 @@
 #include <openssl/hmac.h>
 #include <openssl/md5.h>
 #include <libxml/xmlreader.h>
+#include <locale.h>
 
 #include "oss.h"
 
-static gchar *get_current_date_time_gmt();
 static gchar *sign(const OssService *service, const gchar *method, const gchar *content_md5, const gchar *content_type, const gchar *date, GHashTable *header, const gchar *path);
 static void authorize(const OssService *service, const gchar *method, const gchar *content_md5, const gchar *content_type, GHashTable *header, const gchar *path);
 static gchar *get_current_date_time_gmt();
@@ -1155,8 +1155,12 @@ gint oss_object_delete_multiple(OssService *service, gboolean quiet, GError **er
 static gchar *get_current_date_time_gmt()
 {
   gchar buf[50];
+  gchar *old;
   time_t t = time(NULL);
+  old = setlocale(LC_ALL, NULL);
+  setlocale(LC_TIME, "en_US.UTF-8");
   strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&t));
+  setlocale(LC_ALL, old);
   return g_strdup(buf);
   /*
   GDateTime *now = g_date_time_new_now_utc();
@@ -1716,8 +1720,11 @@ static const gchar* get_canonical_resource(OssObject *object)
     }
   }
 
-  result = g_uri_escape_string(res->str, "/?&#", FALSE);
-  g_string_free(res, TRUE);
+  /*result = g_uri_escape_string(res->str, "/?&#", FALSE);
+    g_string_free(res, TRUE);
+  */
+  result = res->str;
+  g_string_free(res, FALSE);
   return result;
 }
 

@@ -1,4 +1,8 @@
 ChangeLog
 	v0.2
 	====
+	Enhancement
 	Change to OSS API 20121008 version.
+
+	Bug fix
+	Signation error on zh_CN locale.

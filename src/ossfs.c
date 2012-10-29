@@ -1,6 +1,7 @@
 #define FUSE_USE_VERSION 26
 
 #include <glib.h>
+#include <glib/gprintf.h>
 #include <errno.h>
 #include <fuse.h>
 #include <dirent.h>
@@ -50,6 +51,9 @@ static void cache_remove(gpointer key);
 static gboolean cache_contains(gpointer key);
 static gpointer cache_lookup(gpointer key);
 
+static GLogLevelFlags level;
+static void log_to_file(const gchar *log_domain, GLogLevelFlags log_level, const gchar *message, gpointer user_data);
+
 static int ossfs_getattr(const char *path, struct stat *stbuf)
 {
   gint res;
@@ -59,6 +63,7 @@ static int ossfs_getattr(const char *path, struct stat *stbuf)
   gpointer st;
   GString *dir;
 
+  g_debug("ossfs_getattr(path=%s)", path);
   memset(stbuf, 0, sizeof(struct stat));  
   if (cache_contains((gpointer)path)) {
     st = cache_lookup((gpointer)path);
@@ -88,6 +93,7 @@ static int ossfs_getattr(const char *path, struct stat *stbuf)
       dir = g_string_new(path);
       if (dir == NULL) return -ENOMEM;
       g_string_append_c(dir, '/');
+      g_message("try to get %s attribute", dir->str);
       if (g_hash_table_contains(cache, dir->str)) {
 	st = g_hash_table_lookup(cache, dir->str);
 	memcpy(stbuf, st, sizeof(struct stat));
@@ -105,14 +111,20 @@ static int ossfs_getattr(const char *path, struct stat *stbuf)
 	switch (error->code) {
 	case OSS_ERROR_NO_SUCH_KEY:
 	  return -ENOENT;
+        default:
+          return -EIO;
 	}
       }
+      break; /* case OSS_ERROR_NO_SUCH_KEY */
+    default:
+      return -EIO;
     }
   }
 
   /* st_mode */
   value = g_hash_table_lookup(object->meta, OSS_META_MODE);
   if (value) {
+    g_debug("%s: %s", OSS_META_MODE, (gchar*)value);
     stbuf->st_mode = g_ascii_strtoull((gchar*)value, NULL, 10);
   } else {
     stbuf->st_mode = default_mode;
@@ -122,10 +134,12 @@ static int ossfs_getattr(const char *path, struct stat *stbuf)
     } else {
       stbuf->st_mode |= S_IFREG;
     }
+    g_debug("using default mode: %d", stbuf->st_mode);
   }
 
   stbuf->st_nlink = 1;
   stbuf->st_size = object->size;
+  g_debug("size: %ld", (long)stbuf->st_size);
   if (S_ISREG(stbuf->st_mode)) {
     stbuf->st_blocks = stbuf->st_size / 512 + 1;
   }
@@ -147,6 +161,7 @@ static int ossfs_access(const char *path, int mask)
   uid_t uid;
   gid_t gid;
 
+  g_debug("ossfs_access(path=%s)", path);
   /* TODO how to check F_OK */
   /*  memset(&stbuf, 0, sizeof(struct stat));
   res = ossfs_getattr(path, &stbuf);
@@ -199,6 +214,7 @@ static int ossfs_readlink(const char *path, char *buf, size_t size)
 	GError *error;
 	gsize cnt;
 
+        g_debug("ossfs_readlink(path=%s, size=%d)", path, size);
 	g_return_val_if_fail(size >= 0, -EINVAL);
 
 	object = oss_object_new(path);
@@ -220,6 +236,7 @@ static int ossfs_readlink(const char *path, char *buf, size_t size)
 	cnt = fread(buf, 1, size, object->content);
 	if (ferror(object->content)) return -EIO;
 	buf[cnt] = '\0';
+        g_debug("read %d bytes '%s'", size, buf);
 
 	oss_object_destroy(object);
 	return 0;
@@ -233,14 +250,17 @@ static int ossfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
   OssObject *src;
   GError *error;
   gint res;
-  GString *query;
+  /*GString *query;*/
   GSList *cur;
   struct stat stbuf;
   gchar *name;
   gchar prefix[PATH_MAX];
   gsize len;
+  OssListBucketQuery *query;
 
+  g_debug("ossfs_readdir(path=%s)", path);
   res = 0;
+  /*
   query = g_string_sized_new(48);
   if (!query) return -ENOMEM;
 
@@ -264,55 +284,93 @@ static int ossfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     g_string_append_c(query, '?');
   }
   g_string_append(query, "delimiter=/");
+  */
 
-  error = NULL;
-  lbr = oss_bucket_get(service, query->str, &error);
-  if (!lbr) {
-    if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
-    else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
-    else res = -EIO;
-
-    g_string_free(query, TRUE);
-    g_error_free(error);
-    return res;
+  if (g_str_has_prefix(path, "/")) {
+    len = g_strlcpy(prefix, path + 1, PATH_MAX);
+  } else {
+    len = g_strlcpy(prefix, path, PATH_MAX);
   }
-  g_string_free(query, TRUE);
+  if (!g_str_has_suffix(path, "/")) {
+    prefix[len] = '/';
+    prefix[len+1] = '\0';
+  }
+  query = oss_list_bucket_query_new();
+  if (query == NULL) return -ENOMEM;
+  query->prefix = g_strdup(prefix);
+  query->delimiter = g_strdup("/");
 
-  cur = lbr->contents;
-  while (cur) {
-    src = (OssObject*)cur->data;
-    memset(&stbuf, 0, sizeof(struct stat));
-    res = ossfs_getattr(src->key, &stbuf);
-    if (res) break;
-    if (g_str_has_prefix(src->key, prefix)) {
-      name = src->key + strlen(prefix);
-    } else {
-      name = src->key;
+  lbr = NULL;
+  do {
+    if (lbr != NULL) {
+      if (query->marker) g_free(query->marker);
+      query->marker = g_strdup(lbr->next_marker);
+
+      oss_bucket_get_destroy(lbr);
     }
-    if (name == NULL || *name == '\0' || g_strcmp0(name, "/") == 0) {
+
+    error = NULL;
+    lbr = oss_bucket_get(service, bucket, query, &error);
+    if (!lbr) {
+      if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
+      else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
+      else {
+        g_message("oss_bucket_get return %d: %s", error->code, error->message);
+        res = -EIO;
+      }
+
+      /*g_string_free(query, TRUE);*/
+      if (lbr) oss_bucket_get_destroy(lbr);
+      oss_list_bucket_query_destroy(query);
+      g_error_free(error);
+      return res;
+    }
+    /*g_string_free(query, TRUE);*/
+
+    cur = lbr->contents;
+    while (cur) {
+      src = (OssObject*)cur->data;
+      g_debug("ossfs_readdir process object '%s'", src->key);
+      memset(&stbuf, 0, sizeof(struct stat));
+      res = ossfs_getattr(src->key, &stbuf);
+      if (res) {
+	g_warning("ossfs_readdir get object '%s' attribute failed, ignore it", src->key);
+	cur = cur->next;
+	continue;
+      }
+      if (g_str_has_prefix(src->key, prefix)) {
+        name = src->key + strlen(prefix);
+      } else {
+        name = src->key;
+      }
+      if (name == NULL || *name == '\0' || g_strcmp0(name, "/") == 0) {
+        cur = cur->next;
+        continue;
+      }
+      filler(buf, name, &stbuf, 0);
       cur = cur->next;
-      continue;
     }
-    filler(buf, name, &stbuf, 0);
-    cur = cur->next;
-  }
-  cur = lbr->common_prefixes;
-  while (cur) {
-    memset(&stbuf, 0, sizeof(struct stat));
-    res = ossfs_getattr((gchar*)cur->data, &stbuf);
-    if (res) {
+    cur = lbr->common_prefixes;
+    while (cur) {
+      g_debug("ossfs_readdir process directory '%s'", (gchar*)cur->data);
+      memset(&stbuf, 0, sizeof(struct stat));
+      res = ossfs_getattr((gchar*)cur->data, &stbuf);
+      if (res) {
+	g_warning("ossfs_readdir get object '%s' attribute failed, ignore it", (gchar*)cur->data);
+        cur = cur->next;
+        continue;
+      }
+      if (g_str_has_prefix((gchar*)cur->data, prefix)) {
+        name = (gchar*)cur->data + strlen(prefix);
+      } else {
+        name = (gchar*)cur->data;
+      }
+      filler(buf, name, &stbuf, 0);
       cur = cur->next;
-      continue;
     }
-    if (g_str_has_prefix((gchar*)cur->data, prefix)) {
-      name = (gchar*)cur->data + strlen(prefix);
-    } else {
-      name = (gchar*)cur->data;
-    }
-    filler(buf, name, &stbuf, 0);
-    cur = cur->next;
-  }
+  } while (lbr->next_marker && strlen(lbr->next_marker) > 0);
 
+  oss_list_bucket_query_destroy(query);
   oss_bucket_get_destroy(lbr);
   return res;
 }
@@ -324,6 +382,7 @@ static int ossfs_mknod(const char *path, mode_t mode, dev_t rdev)
   GError *error;
   GString *dir;
 
+  g_debug("ossfs_mknod(path=%s, mode=%d)", path, mode);
   dir = g_string_new(path);
   if (S_ISDIR(mode)) { /* mkdir */
     g_string_append_c(dir, '/');
@@ -359,6 +418,7 @@ static int ossfs_mkdir(const char *path, mode_t mode)
   gint cnt;
   GString *dir;
 
+  g_debug("ossfs_mkdir(path=%s, mode=%d)", path, mode);
   dir = g_string_new(path);
   g_string_append_c(dir, '/'); /* dir has suffix / in oss */
   object = oss_object_new(dir->str);
@@ -391,6 +451,7 @@ static int ossfs_unlink(const char *path)
   gint res;
   GError *error;
 
+  g_debug("ossfs_unlink(path=%s)", path);
   error = NULL;
   res = oss_object_delete(service, path, &error);
   if (res) {
@@ -411,12 +472,14 @@ static int ossfs_rmdir(const char *path)
 {
   OssListBucketResult *lbr;
   GError *error;
-  GString *query;
+  /*GString *query;*/
   gint res;
   gchar prefix[PATH_MAX];
   gsize len;
+  OssListBucketQuery *query;
 
-  query = g_string_sized_new(48);
+  g_debug("ossfs_rmdir(path=%s)", path);
+  /*query = g_string_sized_new(48);
   if (!query) return -ENOMEM;
 
   g_string_append(query, "/");
@@ -431,20 +494,37 @@ static int ossfs_rmdir(const char *path)
     prefix[len+1] = '\0';
   }
   g_string_append(query, prefix);
-  g_string_append(query, "&delimiter=/&max-keys=2");
+  g_string_append(query, "&delimiter=/&max-keys=2");*/
+
+  if (g_str_has_prefix(path, "/")) {
+    len = g_strlcpy(prefix, path+1, PATH_MAX);
+  } else {
+    len = g_strlcpy(prefix, path, PATH_MAX);
+  }
+  if (!g_str_has_suffix(path, "/")) {
+    prefix[len] = '/';
+    prefix[len+1] = '\0';
+  }
+  query = oss_list_bucket_query_new();
+  if (query == NULL) return -ENOMEM;
+  query->prefix = g_strdup(prefix);
+  query->delimiter = g_strdup("/");
+  query->max_keys = 2;
 
   error = NULL;
-  lbr = oss_bucket_get(service, query->str, &error);
+  lbr = oss_bucket_get(service, bucket, query, &error);
   if (!lbr) {
     if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
     else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
     else res = -EIO;
 
-    g_string_free(query, TRUE);
+    /*g_string_free(query, TRUE);*/
+    oss_list_bucket_query_destroy(query);
     g_error_free(error);
     return res;
   }
-  g_string_free(query, TRUE);
+  /*g_string_free(query, TRUE);*/
+  oss_list_bucket_query_destroy(query);
   g_error_free(error);
 
   if (g_slist_length(lbr->contents) > 1 || g_slist_length(lbr->common_prefixes)) {
@@ -475,12 +555,13 @@ static int ossfs_symlink(const char *from, const char *to)
   FILE *f;
   gsize cnt;
 
+  g_debug("ossfs_symlink(from=%s, to=%s)", from, to);
   object = oss_object_new(to);
   if (!object) return -ENOMEM;
 
   g_hash_table_insert(object->meta, g_strdup(OSS_META_MODE), ltos((long)(default_mode | S_IFLNK)));
   f = tmpfile();
-  if (f) {
+  if (f == NULL) {
     oss_object_destroy(object);
     return -errno;
   }
@@ -516,6 +597,7 @@ static int ossfs_rename(const char *from, const char *to)
   gint res;
   struct stat stbuf;
 
+  g_debug("ossfs_rename(from=%s, to=%s)", from, to);
   res = 0;
   res = ossfs_getattr(from, &stbuf);
   if (res) return res;
@@ -544,8 +626,10 @@ static int ossfs_chmod(const char *path, mode_t mode)
   GString *dir;
   struct stat stbuf;
 
+  g_debug("ossfs_chmod(path=%s, mode=%d)", path, mode);
   dir = g_string_new(path);
-  if (S_ISDIR(mode)) { /* mkdir */
+  if (S_ISDIR(mode)) { /* path is a directory */
+    g_debug("%s is a directory", path);
     g_string_append_c(dir, '/');
   }
   object = oss_object_new(dir->str);
@@ -555,6 +639,7 @@ static int ossfs_chmod(const char *path, mode_t mode)
   res = oss_object_head(service, object, &error);
   if (res) {
     oss_object_destroy(object);
+    g_error_free(error);
     switch (error->code) {
     case OSS_ERROR_NO_SUCH_KEY:
       return -ENOENT;
@@ -595,6 +680,7 @@ static int ossfs_truncate(const char *path, off_t size)
   GError *error;
   struct stat stbuf;
 
+  g_debug("ossfs_truncate(path=%s, size=%ld)", path, (long)size);
   object = oss_object_new(path);
   if (!object) return -ENOMEM;
 
@@ -612,7 +698,7 @@ static int ossfs_truncate(const char *path, off_t size)
 
   if (object->content == NULL) {
     oss_object_destroy(object);
-    return -EISDIR;
+    return -EIO;
   }
 
   res = ftruncate(fileno(object->content), size);
@@ -657,6 +743,7 @@ static int ossfs_open(const char *path, struct fuse_file_info *fi)
   OssObject *object;
   GError *error;
 
+  g_debug("ossfs_open(path=%s)", path);
   object = oss_object_new(path);
   if (!object) return -ENOMEM;
 
@@ -665,8 +752,8 @@ static int ossfs_open(const char *path, struct fuse_file_info *fi)
   if (res) {
     if (error->code == OSS_ERROR_NO_SUCH_KEY) {
       if (fi->flags & O_CREAT) {
+        g_debug("with O_CREAT: create not exited file %s", object->key);
 	object->content = tmpfile();
-	fi->fh = (gpointer)object;
 	res = 0;
       } else {
 	res = -ENOENT;
@@ -678,25 +765,28 @@ static int ossfs_open(const char *path, struct fuse_file_info *fi)
       oss_object_destroy(object);
       g_error_free(error);
       return res;
+    } else {
+      g_error_free(error);
     }
   }
 
   if (object->content == NULL) {
     object->content = tmpfile();
-    fi->fh = (gpointer)object;
   } else if (fi->flags & O_TRUNC) {
+    g_debug("with O_TRUNC: ftruncate file content");
     res = ftruncate(fileno(object->content), 0);
     if (res == -1) {
       oss_object_destroy(object);
       return -errno;
     }
   }
+  g_debug("set file flags: %d", fi->flags);
   res = fcntl(fileno(object->content), F_SETFL, fi->flags);
   if (res == -1) {
     oss_object_destroy(object);
     return -errno;
   }
-  fi->fh = (gpointer)object;
+  fi->fh = GPOINTER_TO_INT((gpointer)object);
 
   return 0;
 }
@@ -707,7 +797,9 @@ static int ossfs_read(const char *path, char *buf, size_t size, off_t offset,
   int res;
   int fd;
 
-  fd = fileno(((OssObject*)fi->fh)->content);
+  g_debug("ossfs_read(path=%s, size=%d, offset=%ld)", path, size, (long)offset);
+  if (fi->fh == 0) return -EIO;
+  fd = fileno(((OssObject*)GINT_TO_POINTER(fi->fh))->content);
   if (fd == -1) return -errno;
 
   res = pread(fd, buf, size, offset);
@@ -723,7 +815,9 @@ static int ossfs_write(const char *path, const char *buf, size_t size,
   int res;
   int fd;
 
-  fd = fileno(((OssObject*)fi->fh)->content);
+  g_debug("ossfs_write(path=%s, size=%d, offset=%ld)", path, size, (long)offset);
+  if (fi->fh == 0) return -EIO;
+  fd = fileno(((OssObject*)GINT_TO_POINTER(fi->fh))->content);
   if (fd == -1) return -errno;
 
   res = pwrite(fd, buf, size, offset);
@@ -744,13 +838,15 @@ static int ossfs_statfs(const char *path, struct statvfs *stbuf)
   return 0;
 }
 
-static int ossfs_release(const char *path, struct fuse_file_info *fi)
+static int ossfs_flush(const char *path, struct fuse_file_info *fi)
 {
   gint res;
   OssObject *object;
   GError *error;
 
-  object = (OssObject*)fi->fh;
+  g_debug("ossfs_flush(path=%s)", path);
+  if (fi->fh == 0) return -EIO;
+  object = (OssObject*)GINT_TO_POINTER(fi->fh);
   error = NULL;
   res = oss_object_put(service, object, &error);
   if (res) {
@@ -759,12 +855,28 @@ static int ossfs_release(const char *path, struct fuse_file_info *fi)
     else if (error->code == OSS_ERROR_INVALID_OBJECT_NAME) res = -ENAMETOOLONG;
     else res = -EIO;
 
-    oss_object_destroy(object);
     g_error_free(error);
     return res;
   }
-  
-  cache_remove(object->key);
+
+  if (cache_contains(object->key)) {  
+    cache_remove(object->key);
+  }
+  return 0;
+}
+
+static int ossfs_release(const char *path, struct fuse_file_info *fi)
+{
+  gint res;
+  OssObject *object;
+  GError *error;
+
+  g_debug("ossfs_release(path=%s)", path);
+  if (fi->fh == 0) return -EIO;
+  object = (OssObject*)GINT_TO_POINTER(fi->fh);
+  if (cache_contains(object->key)) {
+    cache_remove(object->key);
+  }
   oss_object_destroy(object);
   return 0;
 }
@@ -836,6 +948,7 @@ static struct fuse_operations ossfs_oper = {
 	.read		= ossfs_read,
 	.write		= ossfs_write,
 	.statfs		= ossfs_statfs,
+	.flush          = ossfs_flush,
 	.release	= ossfs_release,
 	.fsync		= ossfs_fsync,
 #ifdef HAVE_POSIX_FALLOCATE
@@ -856,6 +969,10 @@ static void show_help() {
 	 "Options:\n"
 	 "\t-b, --bucket\n"
 	 "\t\tThe bucket name to mount.\n"
+	 "\t-l, --log\n"
+	 "\t\tThe file path to save log message.\n"
+	 "\t-e, --level\n"
+"\t\tThe log level, which can be one of [error, critical, warning, message, info, debug].\n"
 	 "\t-h, --help\n"
 	 "\t\tShow this help.\n"
 	 "\t-v, --version\n"
@@ -891,6 +1008,10 @@ int main(int argc, char **argv)
   int fargc;
   char* fargv[10];
   int i;
+  gchar *logfile;
+  FILE *flog;
+  int fd;
+  gboolean debug;
 
   setlocale(LC_ALL, "");
 
@@ -1024,14 +1145,21 @@ int main(int argc, char **argv)
     {"help", no_argument, NULL, 'h'},
     {"version", no_argument, NULL, 'v'},
     {"bucket", no_argument, NULL, 'b'},
+    {"log", no_argument, NULL, 'l'},
+    {"level", no_argument, NULL, 'e'},
     {0, 0, 0, 0}};
   fargc = 0;
+  logfile = NULL;
+  flog = NULL;
+  level = G_LOG_LEVEL_MESSAGE;
+  debug = FALSE;
 
-  while ((opt = getopt_long(argc, argv, "do:fsub:vh", opts, &index)) != -1) {
+  while ((opt = getopt_long(argc, argv, "do:fsub:vhl:e:", opts, &index)) != -1) {
     switch (opt) {
     case 0:
       break;
     case 'd':
+      debug = TRUE;
       break;
     case 'o':
       break;
@@ -1050,13 +1178,36 @@ int main(int argc, char **argv)
     case 'b':
       bucket = g_strdup((gchar*)optarg);
       break;
+    case 'l':
+      logfile = g_strdup((gchar*)optarg);
+      break;
+    case 'e':
+      if (g_strcmp0(optarg, "error") == 0) level = G_LOG_LEVEL_ERROR;
+      else if (g_strcmp0(optarg, "critical") == 0) level = G_LOG_LEVEL_CRITICAL;
+      else if (g_strcmp0(optarg, "warning") == 0) level = G_LOG_LEVEL_WARNING;
+      else if (g_strcmp0(optarg, "message") == 0) level = G_LOG_LEVEL_MESSAGE;
+      else if (g_strcmp0(optarg, "info") == 0) level = G_LOG_LEVEL_INFO;
+      else if (g_strcmp0(optarg, "debug") == 0) level = G_LOG_LEVEL_DEBUG;
+      break;
     default:
-      exit(-1);
+      exit(EXIT_FAILURE);
     }
   }
 
+  if (logfile) {
+    flog = g_fopen((const gchar*)logfile, "a");
+    if (flog == NULL) {
+      g_print("open log file %s fail: %s\n", optarg, g_strerror(errno));
+      exit(EXIT_FAILURE);
+    }
+    g_debug("log to file %s", logfile);
+    g_log_set_handler(G_LOG_DOMAIN, G_LOG_LEVEL_MASK, log_to_file, flog);
+  } 
+ 
   for (i = 0; i < argc; i++) {
-    if (g_strcmp0(argv[i], "-b") && g_strcmp0(argv[i], "--bucket")) {
+    if (g_strcmp0(argv[i], "-b") && g_strcmp0(argv[i], "--bucket")
+	&& g_strcmp0(argv[i], "-l") && g_strcmp0(argv[i], "--log")
+	&& g_strcmp0(argv[i], "-e") && g_strcmp0(argv[i], "--level")) {
       fargv[fargc++] = argv[i];
     } else {
       i++; 
@@ -1066,7 +1217,7 @@ int main(int argc, char **argv)
   home = getenv("HOME");
   if (home == NULL) {
     g_error("get home directory failed");
-    exit(-1);
+    exit(EXIT_FAILURE);
   }
 
   path = g_string_new(home);
@@ -1074,7 +1225,7 @@ int main(int argc, char **argv)
   g_string_append(path, CONFIG_PATH);
   if (g_mkdir_with_parents(path->str, 0755) == -1) {
     g_error("create config path '%s' failed: %s", path->str, g_strerror(errno));
-    exit(-1);
+    exit(EXIT_FAILURE);
   }
   kf = g_key_file_new();
   g_string_append_c(path, '/');
@@ -1082,7 +1233,7 @@ int main(int argc, char **argv)
   error = NULL;
   if (!g_key_file_load_from_file(kf, path->str, G_KEY_FILE_NONE, &error)) {
     g_error("load config from '%s' failed: %s", path->str, error->message);
-    exit(-1);
+    exit(EXIT_FAILURE);
   }
   conf = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
   if (g_key_file_has_key(kf, "common", "public", NULL)) {
@@ -1173,6 +1324,7 @@ static int rename_object(const char *from, const char *to)
   OssObject *src, *dst;
   GError *error;
 
+  g_debug("rename_object(from=%s, to=%s)", from, to);
   src = oss_object_new(from);
   if (!src) return -ENOMEM;
   dst = oss_object_new(to);
@@ -1209,7 +1361,7 @@ static int rename_directory(const char *from, const char *to)
   OssObject *src;
   GError *error;
   gint res;
-  GString *query;
+  /*GString *query;*/
   GSList *cur;
   GString *name;
   gchar *pos;
@@ -1217,8 +1369,11 @@ static int rename_directory(const char *from, const char *to)
   gsize len;
   struct stat stbuf;
   gchar *dst;
+  OssListBucketQuery *query;
 
+  g_debug("rename_directory(from=%s, to=%s)", from, to);
   res = 0;
+  /*
   query = g_string_sized_new(48);
   if (!query) return -ENOMEM;
 
@@ -1234,19 +1389,20 @@ static int rename_directory(const char *from, const char *to)
     prefix[len+1] = '\0';
   }
   g_string_append(query, prefix);
+  */
 
-  error = NULL;
-  lbr = oss_bucket_get(service, query->str, &error);
-  if (!lbr) {
-    if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
-    else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
-    else res = -EIO;
-
-    g_string_free(query, TRUE);
-    g_error_free(error);
-    return res;
+  query = oss_list_bucket_query_new();
+  if (query == NULL) return -ENOMEM;
+  if (g_str_has_prefix(from, "/")) {
+    len = g_strlcpy(prefix, from+1, PATH_MAX);
+  } else {
+    len = g_strlcpy(prefix, from, PATH_MAX);
   }
-  g_string_free(query, TRUE);
+  if (!g_str_has_suffix(from, "/")) {
+    prefix[len] = '/';
+    prefix[len+1] = '\0';
+  }
+  query->prefix = g_strdup(prefix);  
 
   dst = g_strdup(to);
   if (g_str_has_suffix(dst, "/")) dst[strlen(dst)-1] = '\0';
@@ -1257,51 +1413,81 @@ static int rename_directory(const char *from, const char *to)
     *pos = '\0';
   } while(strlen(dst));
 
-  name = g_string_sized_new(48);
-  cur = lbr->contents;
-  while (cur) {
-    src = (OssObject*)cur->data;
-    /*
-    if (g_strcmp0(src->key, prefix) == 0) {
-      cur = cur->next;
-      continue;
+  error = NULL;
+  lbr = NULL;
+  do {
+    if (lbr != NULL) {
+      if (query->marker) g_free(query->marker);
+      query->marker = g_strdup(lbr->next_marker);
+      oss_bucket_get_destroy(lbr);
     }
-    */
-    if (g_str_has_prefix(to, "/")) {
-      g_string_append(name, to+1);
-    } else {
-      g_string_append(name, to);
-    }
-    if (!g_str_has_suffix(to, "/")) {
-      g_string_append_c(name, '/');
-    }
-    g_string_append(name, src->key + strlen(prefix));
-    res = rename_object(src->key, name->str);
-    if (res) break;
-    g_string_erase(name, 0, name->len);
-    cur = cur->next;
-  }
 
-  g_string_free(name, TRUE);
+    lbr = oss_bucket_get(service, bucket, query, &error);
+    if (!lbr) {
+      if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
+      else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
+      else res = -EIO;
+
+      /*g_string_free(query, TRUE);*/
+      if (lbr) oss_bucket_get_destroy(lbr);
+      oss_list_bucket_query_destroy(query);
+      g_error_free(error);
+      return res;
+    }
+    /*g_string_free(query, TRUE);*/
+
+    name = g_string_sized_new(48);
+    cur = lbr->contents;
+    while (cur) {
+      src = (OssObject*)cur->data;
+      /*
+      if (g_strcmp0(src->key, prefix) == 0) {
+        cur = cur->next;
+        continue;
+      }
+      */
+      if (g_str_has_prefix(to, "/")) {
+        g_string_append(name, to+1);
+      } else {
+        g_string_append(name, to);
+      }
+      if (!g_str_has_suffix(to, "/")) {
+        g_string_append_c(name, '/');
+      }
+      g_string_append(name, src->key + strlen(prefix));
+      res = rename_object(src->key, name->str);
+      if (res) break;
+      g_string_erase(name, 0, name->len);
+      cur = cur->next;
+    }
+
+    g_string_free(name, TRUE);
+  } while (lbr->next_marker && strlen(lbr->next_marker) > 0);
+
+  oss_list_bucket_query_destroy(query);
   oss_bucket_get_destroy(lbr);
   return res;
 }
 
 static void cache_init(void)
 {
+  g_mutex_lock(cache_lock);
   if (cache == NULL) {
     cache = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
   }
+  g_mutex_unlock(cache_lock);
 }
 
 static void cache_add(gpointer key, gpointer value)
 {
+  g_message("cache_add(key='%s')", (gchar*)key);
   g_mutex_lock(cache_lock);
   g_hash_table_insert(cache, key, value);
   g_mutex_unlock(cache_lock);
 }
 static void cache_remove(gpointer key)
 {
+  g_message("cache_remove(key='%s')", (gchar*)key);
   g_mutex_lock(cache_lock);
   g_hash_table_remove(cache, key);
   g_mutex_unlock(cache_lock);
@@ -1313,4 +1499,23 @@ static gboolean cache_contains(gpointer key)
 static gpointer cache_lookup(gpointer key)
 {
   return g_hash_table_lookup(cache, key);
+}
+
+void log_to_file(const gchar *log_domain, GLogLevelFlags log_level, const gchar *message, gpointer user_data)
+{
+  gchar *level_message;
+  FILE *f;
+
+  if (log_level > level) return;
+
+  if (log_level & G_LOG_LEVEL_ERROR) level_message = "Error";
+  else if (log_level & G_LOG_LEVEL_CRITICAL) level_message = "Critical";
+  else if (log_level & G_LOG_LEVEL_WARNING) level_message = "Warning";
+  else if (log_level & G_LOG_LEVEL_MESSAGE) level_message = "Message";
+  else if (log_level & G_LOG_LEVEL_INFO) level_message = "Info";
+  else if (log_level & G_LOG_LEVEL_DEBUG) level_message = "Debug";
+
+  f = (FILE*)user_data;
+  g_fprintf(f, "[%ld][%s] - %s\n", (long)time(NULL), level_message, message);
+  fflush(f);
 }

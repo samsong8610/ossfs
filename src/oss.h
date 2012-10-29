@@ -68,6 +68,7 @@ typedef struct {
   const gchar *access_key;
   HttpClient *client;
   const EVP_MD *sha1;
+  const GHashTable *mime_types;
 } OssService;
 
 typedef struct {
@@ -104,12 +105,20 @@ typedef struct {
 } OssObject;
 
 typedef struct {
+  gchar *prefix;
+  gchar *delimiter;
+  gchar *marker;
+  gint max_keys;
+} OssListBucketQuery;
+
+typedef struct {
   gchar *name;
   gchar *prefix;
   gchar *marker;
   guint max_keys;
   gchar *delimiter;
   gboolean is_truncated;
+  gchar *next_marker;
   GSList *contents;
   GSList *common_prefixes;
 } OssListBucketResult;
@@ -121,13 +130,15 @@ void oss_bucket_destroy(OssBucket *bucket);
 OssObject* oss_object_new(const gchar *key);
 OssObject* oss_object_new_file(const gchar *key, const gchar *path, const gchar *mode);
 void oss_object_destroy(OssObject *object);
+OssListBucketQuery* oss_list_bucket_query_new();
+void oss_list_bucket_query_destroy(OssListBucketQuery *query);
 
 GSList* oss_service_get(OssService *service, GError **error);
 void oss_service_get_destroy(GSList *buckets);
 
 gint oss_bucket_put(OssService *service, OssBucket *bucket, GError **error);
 gint oss_bucket_put_acl(OssService *service, OssBucket *bucket, GError **error);
-OssListBucketResult* oss_bucket_get(OssService *service, const gchar *resource, GError **error);
+OssListBucketResult* oss_bucket_get(OssService *service, const gchar *bucket, OssListBucketQuery *query, GError **error);
 OssBucket* oss_bucket_get_acl(OssService *service, const gchar *bucket, GError **error);
 gint oss_bucket_delete(OssService *service, const gchar *bucket, GError **error);
 void oss_bucket_get_destroy(OssListBucketResult *list);

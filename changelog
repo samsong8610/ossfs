@@ -3,6 +3,13 @@ ChangeLog
 	====
 	Enhancement
 	Change to OSS API 20121008 version.
-
+	Add a few dependency install instructions.
+	2012/10/29	Http client create a new curl handle for every request.
+			Add some log for debug.
+			Set Content-Type according file extentions.
+			Add OssListBucketQuery structure to wrap bucket get operation parameters.
+			Http client operation return http status code or -1.
+			Add -l(logfile) -e(level) options to set logfile and log level.
+	
 	Bug fix
 	Signation error on zh_CN locale.

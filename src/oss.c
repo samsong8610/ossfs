@@ -8,12 +8,15 @@
 
 #include "oss.h"
 
+#define CONTENT_TYPE_DEFAULT "application/json"
+
 static gchar *sign(const OssService *service, const gchar *method, const gchar *content_md5, const gchar *content_type, const gchar *date, GHashTable *header, const gchar *path);
 static void authorize(const OssService *service, const gchar *method, const gchar *content_md5, const gchar *content_type, GHashTable *header, const gchar *path);
 static gchar *get_current_date_time_gmt();
 static const gchar* calculate_md5(const gchar *content, gsize len);
 static GSList* process_list_all_my_buckets_result(FILE *f);
 static OssError* process_error(FILE *f);
+static void oss_error_destroy(OssError *error);
 static OssListBucketResult* process_list_bucket_result(FILE *f);
 static HttpClient* get_or_create_client(OssService *service);
 static OssBucket* process_access_control_policy(FILE *f);
@@ -24,6 +27,12 @@ OssService *oss_service_new(const gchar *bucket, GHashTable *conf)
 {
   OssService *result;
   gpointer value;
+  FILE *f;
+  gchar line[1024];
+  gchar **parts;
+  gchar *mime;
+  gchar *cur;
+  gint i;
 
   result = g_new0(OssService, 1);
   result->bucket = bucket;
@@ -73,6 +82,28 @@ OssService *oss_service_new(const gchar *bucket, GHashTable *conf)
 
   result->client = NULL;
 
+  f = fopen("/etc/mime.types", "r");
+  if (f == NULL) {
+    result->mime_types = NULL;
+  } else {
+    result->mime_types = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
+    while (fgets(line, 1024, f)) {
+      if (strlen(line) == 0 || line[0] == '#') continue;
+      parts = g_strsplit_set(line, " \t\n", 0);
+      mime = *parts;
+      if (mime == NULL || strlen(mime) == 0) continue;
+      cur = *(parts + 1);
+      i = 1;
+      while (cur) {
+        if (strlen(cur) > 0) {
+          g_hash_table_insert(result->mime_types, g_strdup(cur), g_strdup(mime));
+        }
+        i++;
+        cur = *(parts + i);
+      }
+      g_strfreev(parts);
+    }
+  }
   return result;
 }
 
@@ -83,6 +114,10 @@ void oss_service_destroy(OssService *service)
   if (service->client) {
     http_client_destroy((HttpClient*)service->client);
     service->client = NULL;
+  }
+  if (service->mime_types) {
+    g_hash_table_destroy(service->mime_types);
+    service->mime_types = NULL;
   }
   g_free(service);
 }
@@ -209,6 +244,33 @@ void oss_object_destroy(OssObject *object)
   }
 }
 
+OssListBucketQuery* oss_list_bucket_query_new()
+{
+  OssListBucketQuery *result;
+  result = g_new0(OssListBucketQuery, 1);
+  if (result == NULL) return NULL;
+  return result;
+}
+
+void oss_list_bucket_query_destroy(OssListBucketQuery *query)
+{
+  if (query) {
+    if (query->prefix) {
+      g_free(query->prefix);
+      query->prefix = NULL;
+    }
+    if (query->delimiter) {
+      g_free(query->delimiter);
+      query->delimiter = NULL;
+    }
+    if (query->marker) {
+      g_free(query->marker);
+      query->marker = NULL;
+    }
+    g_free(query);
+  }
+}
+
 GSList *oss_service_get(OssService *service, GError **error)
 {
   GSList *result = NULL;
@@ -234,11 +296,12 @@ GSList *oss_service_get(OssService *service, GError **error)
   }
   *error = NULL;
   gint r = http_client_get(client, res, header, resp_header, NULL, f, error);
-  if (!r) {
+  if (r == 200) {
     rewind(f);
     result = process_list_all_my_buckets_result(f);
   } else {
     /* TODO process error message */
+    g_warning("oss_service_get failed, code=%d, message=%s", (*error)->code, (*error)->message);
   }
 
   fflush(f);
@@ -302,6 +365,7 @@ gint oss_bucket_put(OssService *service, OssBucket *bucket, GError **error)
   len = strlen(bucket->name);
   if (len < 3 || len > 63) {
     g_set_error_literal(error, OSS_ERROR, OSS_ERROR_INVALID_BUCKET_NAME, "Bucket name length must be between 3 and 63 characters.");
+    g_warning("bucket name '%s' is invalid", bucket->name);
     return -1;
   }
    
@@ -311,6 +375,7 @@ gint oss_bucket_put(OssService *service, OssBucket *bucket, GError **error)
     g_match_info_free(match_info);
     g_regex_unref(regex);
     g_set_error_literal(error, OSS_ERROR, OSS_ERROR_INVALID_BUCKET_NAME, "Bucket name does not match naming rule.");
+    g_warning("bucket name '%s' is invalid", bucket->name);
     return -1;
   }
   g_match_info_free(match_info);
@@ -334,7 +399,7 @@ gint oss_bucket_put(OssService *service, OssBucket *bucket, GError **error)
 
   FILE *f = tmpfile();
   if (f == NULL) {
-    g_debug("make temp file failed: %s\n", g_strerror(errno));
+    g_warning("make temp file failed: %s", g_strerror(errno));
     g_set_error(error, OSS_ERROR, OSS_ERROR_FAILED, "make temp file failed: %s\n", g_strerror(errno));
     g_string_free(res, TRUE);
     g_hash_table_destroy(header);
@@ -342,10 +407,11 @@ gint oss_bucket_put(OssService *service, OssBucket *bucket, GError **error)
     return -1;
   }
   r = http_client_put(client, res->str, header, resp_header, NULL, NULL, NULL, f, NULL);
-  if (r) {
+  if (r != 200) {
     *error = NULL;
     if (r >= 400 && r < 500) {
       err = process_error(f);
+      if (err != NULL) {
       if (g_strcmp0(err->code, "BucketAlreadyExists") == 0) {
 	g_set_error(error, OSS_ERROR, OSS_ERROR_BUCKET_ALREADY_EXISTS, "%s", err->message);
       } else if (g_strcmp0(err->code, "InvalidBucketName") == 0) {
@@ -360,14 +426,18 @@ gint oss_bucket_put(OssService *service, OssBucket *bucket, GError **error)
 	g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, err->message);
       }
 
-      g_free(err);
+      oss_error_destroy(err);
       err = NULL;
+      } else {
+        g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, "Bad format error response");
+      }
     } else if (r == -1) {
       g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, client->error_message);
     } else {
       g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, client->status_message);
     }
 
+    g_warning("oss_bucket_put failed, code=%d, message=%s", (*error)->code, (*error)->message);
     fclose(f);
     g_string_free(res, TRUE);
     g_hash_table_destroy(header);
@@ -387,7 +457,7 @@ gint oss_bucket_put_acl(OssService *service, OssBucket *bucket, GError **error)
   return oss_bucket_put(service, bucket, error);
 }
 
-OssListBucketResult* oss_bucket_get(OssService *service, const gchar *resource, GError **error)
+OssListBucketResult* oss_bucket_get(OssService *service, const gchar *bucket, OssListBucketQuery *query, GError **error)
 {
   HttpClient *client;
   GString *res;
@@ -395,16 +465,42 @@ OssListBucketResult* oss_bucket_get(OssService *service, const gchar *resource, 
   OssListBucketResult *result = NULL;
   OssError *err = NULL;
   GError *ce;
+  gint first;
+  gchar buf[5];
 
   g_return_val_if_fail(error == NULL || *error == NULL, NULL);
 
+  service->bucket = bucket;
   client = get_or_create_client(service);
 
-  if (g_str_has_prefix(resource, "/")) {
-    res = g_string_new(resource);
-  } else {
-    res = g_string_new("/");
-    g_string_append(res, resource);
+  first = 1;
+  res = g_string_new("/");
+  if (query) {
+    if (query->prefix) {
+      g_string_append_c(res, first?'?':'&');
+      g_string_append(res, "prefix=");
+      g_string_append(res, query->prefix);
+      first = 0;
+    }
+    if (query->delimiter) {
+      g_string_append_c(res, first?'?':'&');
+      g_string_append(res, "delimiter=");
+      g_string_append(res, query->delimiter);
+      first = 0;
+    }
+    if (query->marker) {
+      g_string_append_c(res, first?'?':'&');
+      g_string_append(res, "marker=");
+      g_string_append(res, query->marker);
+      first = 0;
+    }
+    if (query->max_keys > 0) {
+      g_string_append_c(res, first?'?':'&');
+      snprintf(buf, 5, "%d", query->max_keys>1000?1000:query->max_keys);
+      g_string_append(res, "max_keys=");
+      g_string_append(res, buf);
+      first = 0;
+    }
   }
 
   GHashTable *header = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
@@ -426,10 +522,13 @@ OssListBucketResult* oss_bucket_get(OssService *service, const gchar *resource, 
   }
 
   r = http_client_get(client, res->str, header, resp_header, NULL, f, error);
-  if (r) {
-    ce = g_error_copy(*error);
+  if (r == 200) {
+    result = process_list_bucket_result(f);
+  } else if (r >= 400 && r < 500) {
+    ce = *error;
     *error = NULL;
     err = process_error(f);
+    if (err) {
     if (g_strcmp0(err->code, "NoSuchBucket") == 0) {
       g_set_error_literal(error, OSS_ERROR, OSS_ERROR_NO_SUCH_BUCKET, err->message);
     } else if (g_strcmp0(err->code, "AccessDenied") == 0) {
@@ -439,9 +538,11 @@ OssListBucketResult* oss_bucket_get(OssService *service, const gchar *resource, 
     } else {
       g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, ce->message);
     }
+    } else {
+      g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, "Bad format error response");
+    }
     g_error_free(ce);
-  } else {
-    result = process_list_bucket_result(f);
+    g_warning("oss_bucket_get failed, code=%d, message=%s", (*error)->code, (*error)->message);
   }
 
   fflush(f);
@@ -473,6 +574,10 @@ void oss_bucket_get_destroy(OssListBucketResult *list)
   if (list->delimiter) {
     g_free(list->delimiter);
     list->delimiter = NULL;
+  }
+  if (list->next_marker) {
+    g_free(list->next_marker);
+    list->next_marker = NULL;
   }
   cur = list->contents;
   while (cur) {
@@ -508,7 +613,7 @@ OssBucket* oss_bucket_get_acl(OssService *service, const gchar *bucket, GError *
 
   FILE *f = tmpfile();
   if (f == NULL) {
-    g_debug("make temp file failed: %s\n", g_strerror(errno));
+    g_debug("make temp file failed: %s", g_strerror(errno));
     g_set_error(error, OSS_ERROR, OSS_ERROR_FAILED, "make temp file failed: %s\n", g_strerror(errno));
     g_string_free(res, TRUE);
     g_hash_table_destroy(header);
@@ -517,13 +622,13 @@ OssBucket* oss_bucket_get_acl(OssService *service, const gchar *bucket, GError *
   }
 
   r = http_client_get(client, res->str, header, resp_header, NULL, f, error);
-  if (r) {
-    /* TODO process error */
-
-  } else {
+  if (r == 200) {
     result = process_access_control_policy(f);
     result->name = g_strdup(bucket);
     result->creation_date = NULL;
+  } else if (r >= 400 && r < 500) {
+    /* TODO process error */
+    g_warning("oss_bucket_get_acl failed");
   }
 
   fflush(f);
@@ -567,7 +672,7 @@ gint oss_bucket_delete(OssService *service, const gchar *bucket, GError **error)
   }
 
   r = http_client_delete(client, res->str, header, resp_header, NULL, f, NULL);
-  if (r) {
+  if (r != 200) {
     err = process_error(f);
     *error = NULL;
     if (r >= 400 && r < 500) {
@@ -583,8 +688,9 @@ gint oss_bucket_delete(OssService *service, const gchar *bucket, GError **error)
     } else if (r == -1) {
       g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, client->error_message);
     } else {
-      g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, client->status_message);
+      g_set_error_literal(error, OSS_ERROR, r, client->status_message);
     }
+    g_warning("oss_bucket_delete failed, code=%d, message=%s", (*error)->code, (*error)->message);
 
     fflush(f);
     fclose(f);
@@ -618,6 +724,7 @@ gint oss_object_put(OssService *service, OssObject *object, GError **error)
   len = strlen(object->key);
   if (len < OSS_OBJECT_KEY_MIN || len > OSS_OBJECT_KEY_MAX) {
     *error = g_error_new_literal(OSS_ERROR, OSS_ERROR_INVALID_ARGUMENT, "InvalidKey");
+    g_warning("object key '%s' is invalid", object->key);
     return -1;
   }
    
@@ -630,6 +737,17 @@ gint oss_object_put(OssService *service, OssObject *object, GError **error)
   gchar *date = get_current_date_time_gmt();
   g_hash_table_insert(header, g_strdup("Date"), date);
   g_hash_table_insert(header, g_strdup("Expect"), g_strdup(""));/*disable Expect header. */
+
+  gchar *ext;
+  gpointer *content_type = CONTENT_TYPE_DEFAULT;
+  ext = strrchr(object->key, '.');
+  if (ext != NULL && strlen(ext) > 1 && service->mime_types) {
+    ext++; /* ignore '.' */
+    value = g_hash_table_lookup(service->mime_types, ext);
+    if (value) content_type = value;
+  }
+  g_hash_table_insert(header, g_strdup("Content-Type"), g_strdup(content_type));
+
   if (object->meta) {
     g_hash_table_iter_init(&iter, object->meta);
     while (g_hash_table_iter_next(&iter, &key, &value)) {
@@ -648,22 +766,27 @@ gint oss_object_put(OssService *service, OssObject *object, GError **error)
 
   FILE *f = tmpfile();
   if (f == NULL) {
-    g_debug("make temp file failed: %s\n", g_strerror(errno));
+    g_debug("make temp file failed: %s", g_strerror(errno));
     g_set_error(error, OSS_ERROR, OSS_ERROR_FAILED, "make temp file failed: %s\n", g_strerror(errno));
     g_free((gpointer)res);
     g_hash_table_destroy(header);
     g_hash_table_destroy(resp_header);
     return -1;
   }
+  if (object->content) {
+    rewind(object->content);
+  }
+
   r = http_client_put(client, res, header, resp_header, NULL, object->content, NULL, f, NULL);
-  if (r) {
+  if (r != 200) {
     if (r == 404) {
       g_set_error_literal(error, OSS_ERROR, OSS_ERROR_NO_SUCH_BUCKET, "NoSuchBucket");
     } else if (r == 403) {
       g_set_error_literal(error, OSS_ERROR, OSS_ERROR_ACCESS_DENIED, "AccessDenied");
     } else {
-      g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, client->error_message);
+      g_set_error_literal(error, OSS_ERROR, r, client->error_message);
     }
+    g_warning("oss_object_put failed, code=%d, message=%s", (*error)->code, (*error)->message);
 
     g_free((gpointer)res);
     fclose(f);
@@ -695,6 +818,7 @@ gint oss_object_get(OssService *service, OssObject *object, GError **error)
   len = strlen(object->key);
   if (len < OSS_OBJECT_KEY_MIN || len > OSS_OBJECT_KEY_MAX) {
     *error = g_error_new_literal(OSS_ERROR, OSS_ERROR_INVALID_OBJECT_NAME, "Object name is too long");
+    g_warning("object key '%s' is too long", object->key);
     return -1;
   }
 
@@ -726,7 +850,7 @@ gint oss_object_get(OssService *service, OssObject *object, GError **error)
   if (object->content == NULL) {
     f = tmpfile();
     if (f == NULL) {
-      g_debug("make temp file failed: %s\n", g_strerror(errno));
+      g_debug("make temp file failed: %s", g_strerror(errno));
     g_set_error(error, OSS_ERROR, OSS_ERROR_FAILED, "make temp file failed: %s\n", g_strerror(errno));
       g_free((gpointer)res);
       g_hash_table_destroy(header);
@@ -737,17 +861,25 @@ gint oss_object_get(OssService *service, OssObject *object, GError **error)
   } else {
     f = object->content;
   }
+  rewind(f);
 
   r = http_client_get(client, res, header, resp_header, NULL, f, NULL);
-  if (r) {
-    /* TODO process error */
-    err = process_error(f);
+  if (r != 200) {
+    /* TODO support conditional get */
     error = NULL;
     if (r == 404) {
-      g_set_error_literal(error, OSS_ERROR, OSS_ERROR_NO_SUCH_KEY, err->message);
+      err = process_error(f);
+      if (err == NULL) {
+        g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, "Bad format error response");
+      } else {
+        g_set_error_literal(error, OSS_ERROR, OSS_ERROR_NO_SUCH_KEY, err->message);
+        oss_error_destroy(err);
+        err = NULL;
+      }
     } else {
-      g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, client->error_message);
+      g_set_error_literal(error, OSS_ERROR, r, client->error_message);
     }
+    g_warning("oss_object_get failed, code=%d, message=%s", (*error)->code, (*error)->message);
 
     fflush(f);
     g_free((gpointer)res);
@@ -798,6 +930,7 @@ gint oss_object_copy(OssService *service, OssObject *object, const gchar *src_bu
   len = strlen(object->key);
   if (len < OSS_OBJECT_KEY_MIN || len > OSS_OBJECT_KEY_MAX) {
     *error = g_error_new_literal(OSS_ERROR, OSS_ERROR_INVALID_ARGUMENT, "InvalidKey");
+    g_warning("object key '%s' is too long", object->key);
     return -1;
   }
    
@@ -847,7 +980,7 @@ gint oss_object_copy(OssService *service, OssObject *object, const gchar *src_bu
 
   FILE *f = tmpfile();
   if (f == NULL) {
-    g_debug("make temp file failed: %s\n", g_strerror(errno));
+    g_debug("make temp file failed: %s", g_strerror(errno));
     g_set_error(error, OSS_ERROR, OSS_ERROR_FAILED, "make temp file failed: %s\n", g_strerror(errno));
     g_free((gpointer)res);
     g_hash_table_destroy(header);
@@ -855,14 +988,15 @@ gint oss_object_copy(OssService *service, OssObject *object, const gchar *src_bu
     return -1;
   }
   r = http_client_put(client, res, header, resp_header, NULL, NULL, NULL, f, NULL);
-  if (r) {
+  if (r != 200) {
     if (r == 404) {
       g_set_error_literal(error, OSS_ERROR, OSS_ERROR_NO_SUCH_BUCKET, "NoSuchBucket");
     } else if (r == 403) {
       g_set_error_literal(error, OSS_ERROR, OSS_ERROR_ACCESS_DENIED, "AccessDenied");
     } else {
-      g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, client->error_message);
+      g_set_error_literal(error, OSS_ERROR, r, client->error_message);
     }
+    g_warning("oss_object_copy failed, code=%d, message=%s", (*error)->code, (*error)->message);
 
     fclose(f);
     g_free((gpointer)res);
@@ -899,6 +1033,7 @@ gint oss_object_head(OssService *service, OssObject *object, GError **error)
   len = strlen(object->key);
   if (len < OSS_OBJECT_KEY_MIN || len > OSS_OBJECT_KEY_MAX) {
     *error = g_error_new_literal(OSS_ERROR, OSS_ERROR_INVALID_OBJECT_NAME, "InvalidObjectName");
+    g_warning("object key '%s' is too long", object->key);
     return -1;
   }
 
@@ -928,16 +1063,18 @@ gint oss_object_head(OssService *service, OssObject *object, GError **error)
   authorize(service, HTTP_METHOD_HEAD, NULL, NULL, header, res);
 
   r = http_client_head(client, res, header, resp_header, error);
-  if (r) {
-    err = g_error_copy(*error);
+  if (r != 200) {
+    /* TODO support conditional get */
+    err = *error;
     *error = NULL;
     if (r == 403) {
       g_set_error_literal(error, OSS_ERROR, OSS_ERROR_ACCESS_DENIED, (err)->message);
     }else if (r == 404) {
       g_set_error_literal(error, OSS_ERROR, OSS_ERROR_NO_SUCH_KEY, (err)->message);
     } else {
-      g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, client->error_message);
+      g_set_error_literal(error, OSS_ERROR, r, client->error_message);
     }
+    g_warning("oss_object_head failed, code=%d, message=%s", (*error)->code, (*error)->message);
     
     g_free((gpointer)res);
     g_hash_table_destroy(header);
@@ -983,6 +1120,7 @@ gint oss_object_delete(OssService *service, const gchar *object,  GError **error
   len = strlen(object);
   if (len < OSS_OBJECT_KEY_MIN || len > OSS_OBJECT_KEY_MAX) {
     *error = g_error_new_literal(OSS_ERROR, OSS_ERROR_INVALID_ARGUMENT, "InvalidKey");
+    g_warning("object key '%s' is too long", object);
     return -1;
   }
 
@@ -1004,7 +1142,7 @@ gint oss_object_delete(OssService *service, const gchar *object,  GError **error
 
   f = tmpfile();
   if (f == NULL) {
-    g_debug("make temp file failed: %s\n", g_strerror(errno));
+    g_debug("make temp file failed: %s", g_strerror(errno));
     g_set_error(error, OSS_ERROR, OSS_ERROR_FAILED, "make temp file failed: %s\n", g_strerror(errno));
     g_free((gpointer)res);
     g_hash_table_destroy(header);
@@ -1012,8 +1150,10 @@ gint oss_object_delete(OssService *service, const gchar *object,  GError **error
     return -1;
   }
   r = http_client_delete(client, res, header, resp_header, NULL, f, NULL);
-  if (r) {
+  if (r != 204) {
     /* TODO process error */
+    g_set_error_literal(error, OSS_ERROR, r, client->error_message);
+    g_warning("oss_object_delete failed, code=%d, message=%s", (*error)->code, (*error)->message);
 
     fclose(f);
     f = NULL;
@@ -1033,6 +1173,7 @@ gint oss_object_delete(OssService *service, const gchar *object,  GError **error
 
 gint oss_object_delete_multiple(OssService *service, gboolean quiet, GError **error, ...)
 {
+  /* TODO not implemented */
   va_list ap;
   const gchar *object;
   HttpClient *client;
@@ -1043,6 +1184,7 @@ gint oss_object_delete_multiple(OssService *service, gboolean quiet, GError **er
   gchar *encoded;
   gchar *md5;
   OssError *err;
+  GError *ce;
 
   g_return_val_if_fail(error == NULL || *error == NULL, -1);
 
@@ -1050,7 +1192,7 @@ gint oss_object_delete_multiple(OssService *service, gboolean quiet, GError **er
 
   fpost = tmpfile();
   if (fpost == NULL) {
-    g_debug("make temp file failed: %s\n", g_strerror(errno));
+    g_warning("make temp file failed: %s", g_strerror(errno));
     g_set_error(error, OSS_ERROR, OSS_ERROR_FAILED, "make temp file failed: %s\n", g_strerror(errno));
     return -1;
   }
@@ -1123,15 +1265,26 @@ gint oss_object_delete_multiple(OssService *service, gboolean quiet, GError **er
     }
   }
   r = http_client_post(client, res, header, resp_header, NULL, encoded, NULL, f, error);
-  if (r) {
+  if (r != 200) {
     /* TODO process error */
+    ce = *error;
+    *error = NULL;
     if (f) {
       rewind(f);
       err = process_error(f);
-
+      if (err == NULL) {
+        g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, ce->message);
+      } else {
+        g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, err->message);
+      }
       fclose(f);
       f = NULL;
+    } else {
+      g_set_error_literal(error, OSS_ERROR, r, client->error_message);
     }
+    g_warning("oss_object_delete_multiple failed, code=%d, message=%s", (*error)->code, (*error)->message);
+
+    g_error_free(ce);
     g_free(encoded);
     g_free((gpointer)res);
     g_hash_table_destroy(header);
@@ -1290,6 +1443,7 @@ static gchar *sign(const OssService *service, const gchar *method, const gchar *
   gssize digest_len;
   HMAC(service->sha1, service->access_key, strlen(service->access_key), buf->str, buf->len, digest, &digest_len);
   result = g_base64_encode((guchar*)digest, digest_len);
+  g_message("sign('%s')='%s'", buf->str, result);
 
   g_string_free(buf, TRUE);
   return result;
@@ -1297,13 +1451,14 @@ static gchar *sign(const OssService *service, const gchar *method, const gchar *
 
 static const gchar* calculate_md5(const gchar *content, gsize len)
 {
+  /*TODO not implemented */
   guchar buf[MD5_DIGEST_LENGTH];
   gchar *result = NULL;
   gsize i;
 
   MD5((guchar*)content, len, buf);
   /*  result = g_base64_encode(buf, MD5_DIGEST_LENGTH); */
-  result = g_new(gchar, MD5_DIGEST_LENGTH * 2 + 1);
+  result = g_new0(gchar, MD5_DIGEST_LENGTH * 2 + 1);
   for (i = 0; i < MD5_DIGEST_LENGTH; i++) {
     g_snprintf((gchar*)(result+2*i), 3, "%02x", (guint)(*(buf+i)));
   }
@@ -1439,6 +1594,37 @@ static OssError* process_error(FILE *f)
   return error;
 }
 
+static void oss_error_destroy(OssError *error)
+{
+  if (error) {
+    if (error->code) {
+      g_free(error->code);
+      error->code = NULL;
+    }
+    if (error->message) {
+      g_free(error->message);
+      error->message = NULL;
+    }
+    if (error->argument_name) {
+      g_free(error->argument_name);
+      error->argument_name = NULL;
+    }
+    if (error->argument_value) {
+      g_free(error->argument_value);
+      error->argument_value = NULL;
+    }
+    if (error->request_id) {
+      g_free(error->request_id);
+      error->request_id = NULL;
+    }
+    if (error->host_id) {
+      g_free(error->host_id);
+      error->host_id = NULL;
+    }
+    g_free(error);
+  }
+}
+
 static OssListBucketResult* process_list_bucket_result(FILE *f)
 {
   const gchar *LIST_BUCKET_RESULT = "ListBucketResult";
@@ -1448,6 +1634,7 @@ static OssListBucketResult* process_list_bucket_result(FILE *f)
   const gchar *MAX_KEYS = "MaxKeys";
   const gchar *DELIMITER = "Delimiter";
   const gchar *IS_TRUNCATED = "IsTruncated";
+  const gchar *NEXT_MARKER = "NextMarker";
   const gchar *CONTENTS = "Contents";
   const gchar *KEY = "Key";
   const gchar *LAST_MODIFIED = "LastModified";
@@ -1514,7 +1701,12 @@ static OssListBucketResult* process_list_bucket_result(FILE *f)
 	    value = xmlTextReaderConstValue(reader);
 	    result->is_truncated = g_ascii_strcasecmp(value, "false") == 0?FALSE:TRUE;
 	  }
-	} else if (g_strcmp0(name, CONTENTS) == 0) {
+	} else if (g_strcmp0(name, NEXT_MARKER) == 0) {
+          if (xmlTextReaderRead(reader) == 1) {
+            value = xmlTextReaderConstValue(reader);
+            result->next_marker == g_strdup(value);
+          }
+        } else if (g_strcmp0(name, CONTENTS) == 0) {
 	  object = g_new0(OssObject, 1);
 	} else if (g_strcmp0(name, KEY) == 0) {
 	  if (xmlTextReaderRead(reader) == 1) {
@@ -1600,7 +1792,7 @@ static HttpClient* get_or_create_client(OssService *service)
   if (service->client == NULL) {
     client = http_client_new(address->str, service->port);
     if (client == NULL) {
-      g_print("Initialize http client failed: %s\n", g_strerror(errno));
+      g_print("Initialize http client failed: %s", g_strerror(errno));
       exit(-1);
     }
     service->client = client;
@@ -1608,13 +1800,14 @@ static HttpClient* get_or_create_client(OssService *service)
     http_client_destroy(service->client);
     client = http_client_new(address->str, service->port);
     if (client == NULL) {
-      g_print("Initialize http client failed: %s\n", g_strerror(errno));
+      g_print("Initialize http client failed: %s", g_strerror(errno));
       exit(-1);
     }
     service->client = client;
   } else {
     client = service->client;
   }
+
   g_string_free(address, FALSE);
   return client;
 }

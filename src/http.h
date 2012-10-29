@@ -40,16 +40,11 @@ typedef enum {
 typedef struct {
   const gchar *host;       /* Target host name or ip address, default localhost. */
   glong port;         /* Server port, default 80. */
-  CURL *handle;      /* Using CURL to communicate. */
+  /*CURL *handle;       Using CURL to communicate. DELETE 20121028 create a new handle every time. */
   long status_code;  /* Status code of last response. */
   gchar status_message[CURL_ERROR_SIZE]; /* Status message of last response, nul-terminated. */
   gchar error_message[CURL_ERROR_SIZE]; /* Receive curl error message */
 } HttpClient;
-
-typedef struct {
-  GHashTable *header;
-  gpointer *body;
-} HttpRequest;
 
 typedef gssize (*HttpWriteFunc)(gpointer ptr, gsize size, gsize nmemb, gpointer user_data);
 typedef gssize (*HttpReadFunc)(gpointer ptr, gsize size, gsize nmemb, gpointer user_data);

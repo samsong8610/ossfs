@@ -9,11 +9,13 @@ ChangeLog
 			Set Content-Type according file extentions.
 			Add OssListBucketQuery structure to wrap bucket get operation parameters.
 			Http client operation return http status code or -1.
-			Add -l(logfile) -e(level) options to set logfile and log level.
+			Add -l(logfile) -e(level) options to set log file and log level.
 
-	2012/10/30	Fix http client return value error.
-			Put object when ossfs_release not ossfs_flush only mode is rw/wo.
-			Add some defensive code.
+	2012/10/30	Put object when ossfs_release instead ossfs_flush only mode is rw/wo.
+			Add some defensive codes.
 
 	Bug fix
 	Signation error on zh_CN locale.
+
+	2012/10/30	Fix http client return value error.
+			Fix paging error when list objects in a bucket.

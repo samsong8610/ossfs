@@ -299,7 +299,6 @@ static int ossfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
   if (query == NULL) return -ENOMEM;
   query->prefix = g_strdup(prefix);
   query->delimiter = g_strdup("/");
-  query->max_keys = 10;
 
   lbr = NULL;
   do {

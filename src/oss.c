@@ -497,7 +497,7 @@ OssListBucketResult* oss_bucket_get(OssService *service, const gchar *bucket, Os
     if (query->max_keys > 0) {
       g_string_append_c(res, first?'?':'&');
       snprintf(buf, 5, "%d", query->max_keys>1000?1000:query->max_keys);
-      g_string_append(res, "max_keys=");
+      g_string_append(res, "max-keys=");
       g_string_append(res, buf);
       first = 0;
     }
@@ -1710,7 +1710,7 @@ static OssListBucketResult* process_list_bucket_result(FILE *f)
 	} else if (g_strcmp0(name, NEXT_MARKER) == 0) {
           if (xmlTextReaderRead(reader) == 1) {
             value = xmlTextReaderConstValue(reader);
-            result->next_marker == g_strdup(value);
+            result->next_marker = g_strdup(value);
           }
         } else if (g_strcmp0(name, CONTENTS) == 0) {
 	  object = g_new0(OssObject, 1);

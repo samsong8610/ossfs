@@ -10,6 +10,10 @@ ChangeLog
 			Add OssListBucketQuery structure to wrap bucket get operation parameters.
 			Http client operation return http status code or -1.
 			Add -l(logfile) -e(level) options to set logfile and log level.
-	
+
+	2012/10/30	Fix http client return value error.
+			Put object when ossfs_release not ossfs_flush only mode is rw/wo.
+			Add some defensive code.
+
 	Bug fix
 	Signation error on zh_CN locale.

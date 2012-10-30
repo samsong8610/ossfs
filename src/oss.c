@@ -524,20 +524,26 @@ OssListBucketResult* oss_bucket_get(OssService *service, const gchar *bucket, Os
   r = http_client_get(client, res->str, header, resp_header, NULL, f, error);
   if (r == 200) {
     result = process_list_bucket_result(f);
+    if (result == NULL) {
+      ce = *error;
+      *error = NULL;
+      g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, "process_list_bucket_result() return NULL");
+      g_error_free(ce);
+    }
   } else if (r >= 400 && r < 500) {
     ce = *error;
     *error = NULL;
     err = process_error(f);
     if (err) {
-    if (g_strcmp0(err->code, "NoSuchBucket") == 0) {
-      g_set_error_literal(error, OSS_ERROR, OSS_ERROR_NO_SUCH_BUCKET, err->message);
-    } else if (g_strcmp0(err->code, "AccessDenied") == 0) {
-      g_set_error_literal(error, OSS_ERROR, OSS_ERROR_ACCESS_DENIED, err->message);
-    } else if (g_strcmp0(err->code, "InvalidArgument") == 0) {
-      g_set_error_literal(error, OSS_ERROR, OSS_ERROR_INVALID_ARGUMENT, err->message);
-    } else {
-      g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, ce->message);
-    }
+      if (g_strcmp0(err->code, "NoSuchBucket") == 0) {
+	g_set_error_literal(error, OSS_ERROR, OSS_ERROR_NO_SUCH_BUCKET, err->message);
+      } else if (g_strcmp0(err->code, "AccessDenied") == 0) {
+	g_set_error_literal(error, OSS_ERROR, OSS_ERROR_ACCESS_DENIED, err->message);
+      } else if (g_strcmp0(err->code, "InvalidArgument") == 0) {
+	g_set_error_literal(error, OSS_ERROR, OSS_ERROR_INVALID_ARGUMENT, err->message);
+      } else {
+	g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, ce->message);
+      }
     } else {
       g_set_error_literal(error, OSS_ERROR, OSS_ERROR_FAILED, "Bad format error response");
     }
@@ -762,12 +768,12 @@ gint oss_object_put(OssService *service, OssObject *object, GError **error)
   }
 
   /*TODO content md5 */
-  authorize(service, HTTP_METHOD_PUT, NULL, NULL, header, res);
+  authorize(service, HTTP_METHOD_PUT, NULL, content_type, header, res);
 
   FILE *f = tmpfile();
   if (f == NULL) {
     g_debug("make temp file failed: %s", g_strerror(errno));
-    g_set_error(error, OSS_ERROR, OSS_ERROR_FAILED, "make temp file failed: %s\n", g_strerror(errno));
+    g_set_error(error, OSS_ERROR, OSS_ERROR_FAILED, "make temp file failed: %s", g_strerror(errno));
     g_free((gpointer)res);
     g_hash_table_destroy(header);
     g_hash_table_destroy(resp_header);

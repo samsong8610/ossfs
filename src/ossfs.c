@@ -73,7 +73,7 @@ static int ossfs_getattr(const char *path, struct stat *stbuf)
 
   if (g_strcmp0(path, "/") == 0) {
     stbuf->st_nlink = 1;
-    stbuf->st_mode = root_mode | S_IFDIR;
+    stbuf->st_mode = default_mode | S_IFDIR;
     stbuf->st_uid = getuid();
     stbuf->st_gid = getgid();
     return 0;
@@ -299,6 +299,7 @@ static int ossfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
   if (query == NULL) return -ENOMEM;
   query->prefix = g_strdup(prefix);
   query->delimiter = g_strdup("/");
+  query->max_keys = 10;
 
   lbr = NULL;
   do {
@@ -464,7 +465,9 @@ static int ossfs_unlink(const char *path)
     return res;
   }
 
-  cache_remove((gpointer)path);
+  if (cache_contains((gpointer)path)) {
+    cache_remove((gpointer)path);
+  }
   return 0;
 }
 
@@ -525,7 +528,6 @@ static int ossfs_rmdir(const char *path)
   }
   /*g_string_free(query, TRUE);*/
   oss_list_bucket_query_destroy(query);
-  g_error_free(error);
 
   if (g_slist_length(lbr->contents) > 1 || g_slist_length(lbr->common_prefixes)) {
     oss_bucket_get_destroy(lbr);
@@ -587,7 +589,9 @@ static int ossfs_symlink(const char *from, const char *to)
     return res;
   }
 
-  cache_remove(object->key);
+  if (cache_contains(object->key)) {
+    cache_remove(object->key);
+  }
   oss_object_destroy(object);
   return 0;
 }
@@ -608,8 +612,12 @@ static int ossfs_rename(const char *from, const char *to)
     res = rename_object(from, to);
   }
 
-  cache_remove((gpointer)from);
-  cache_remove((gpointer)to);
+  if (cache_contains((gpointer)from)) {
+    cache_remove((gpointer)from);
+  }
+  if (cache_contains((gpointer)to)) {
+    cache_remove((gpointer)to);
+  }
   return res;
 }
 
@@ -662,7 +670,9 @@ static int ossfs_chmod(const char *path, mode_t mode)
     return res;
   }
 
-  cache_remove(object->key);
+  if (cache_contains(object->key)) {
+    cache_remove(object->key);
+  }
   oss_object_destroy(object);
   return 0;
 }
@@ -724,7 +734,9 @@ static int ossfs_truncate(const char *path, off_t size)
     return res;
   }
 
-  cache_remove(object->key);
+  if (cache_contains(object->key)) {
+    cache_remove(object->key);
+  }
   oss_object_destroy(object);
   return 0;
 }
@@ -772,6 +784,7 @@ static int ossfs_open(const char *path, struct fuse_file_info *fi)
 
   if (object->content == NULL) {
     object->content = tmpfile();
+    g_warning("open an not exited file? create tmpfile");
   } else if (fi->flags & O_TRUNC) {
     g_debug("with O_TRUNC: ftruncate file content");
     res = ftruncate(fileno(object->content), 0);
@@ -787,6 +800,7 @@ static int ossfs_open(const char *path, struct fuse_file_info *fi)
     return -errno;
   }
   fi->fh = GPOINTER_TO_INT((gpointer)object);
+  g_debug("file handle: %d", fi->fh);
 
   return 0;
 }
@@ -796,15 +810,29 @@ static int ossfs_read(const char *path, char *buf, size_t size, off_t offset,
 {
   int res;
   int fd;
+  OssObject *object;
 
   g_debug("ossfs_read(path=%s, size=%d, offset=%ld)", path, size, (long)offset);
-  if (fi->fh == 0) return -EIO;
-  fd = fileno(((OssObject*)GINT_TO_POINTER(fi->fh))->content);
-  if (fd == -1) return -errno;
+  if (fi->fh == 0) {
+    g_warning("file handle is NULL");
+    return -EIO;
+  }
+  object = (OssObject*)(GINT_TO_POINTER(fi->fh));
+  if (object == NULL || object->content == NULL) {
+    g_warning("file handle type is not an OssObject");
+    return -EIO;
+  }
+  fd = fileno(object->content);
+  if (fd == -1) {
+    g_warning("get file descriptor failed, errno=%d, strerror=%s", errno, g_strerror(errno));
+    return -errno;
+  }
 
   res = pread(fd, buf, size, offset);
-  if (res == -1)
+  if (res == -1) {
+    g_warning("pread failed, errno=%d, strerror=%s", errno, g_strerror(errno));
     res = -errno;
+  }
 
   return res;
 }
@@ -814,15 +842,29 @@ static int ossfs_write(const char *path, const char *buf, size_t size,
 {
   int res;
   int fd;
+  OssObject *object;
 
   g_debug("ossfs_write(path=%s, size=%d, offset=%ld)", path, size, (long)offset);
-  if (fi->fh == 0) return -EIO;
-  fd = fileno(((OssObject*)GINT_TO_POINTER(fi->fh))->content);
-  if (fd == -1) return -errno;
+  if (fi->fh == 0) {
+    g_warning("file handle is NULL");
+    return -EIO;
+  }
+  object = (OssObject*)(GINT_TO_POINTER(fi->fh));
+  if (object == NULL || object->content == NULL) {
+    g_warning("file handle type is not an OssObject");
+    return -EIO;
+  }
+  fd = fileno(object->content);
+  if (fd == -1) {
+    g_warning("get file descriptor failed, errno=%d, strerror=%s", errno, g_strerror(errno));
+    return -errno;
+  }
 
   res = pwrite(fd, buf, size, offset);
-  if (res == -1)
+  if (res == -1) {
+    g_warning("pwrite failed, errno=%d, strerror=%s", errno, g_strerror(errno));
     res = -errno;
+  }
 
   return res;
 }
@@ -845,11 +887,21 @@ static int ossfs_flush(const char *path, struct fuse_file_info *fi)
   GError *error;
 
   g_debug("ossfs_flush(path=%s)", path);
-  if (fi->fh == 0) return -EIO;
-  object = (OssObject*)GINT_TO_POINTER(fi->fh);
+  /* move to ossfs_release */
+  /*
+  if (fi->fh == 0) {
+    g_warning("file handle is NULL");
+    return -EIO;
+  }
+  object = (OssObject*)(GINT_TO_POINTER(fi->fh));
+  if (object == NULL || object->content == NULL) {
+    g_warning("file handle type is not an OssObject");
+    return -EIO;
+  }
   error = NULL;
   res = oss_object_put(service, object, &error);
   if (res) {
+    g_warning("flush failed, code=%d, message=%s", error->code, error->message);
     if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
     else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
     else if (error->code == OSS_ERROR_INVALID_OBJECT_NAME) res = -ENAMETOOLONG;
@@ -862,6 +914,7 @@ static int ossfs_flush(const char *path, struct fuse_file_info *fi)
   if (cache_contains(object->key)) {  
     cache_remove(object->key);
   }
+  */
   return 0;
 }
 
@@ -870,12 +923,51 @@ static int ossfs_release(const char *path, struct fuse_file_info *fi)
   gint res;
   OssObject *object;
   GError *error;
+  struct stat stbuf;
+  int fd;
 
   g_debug("ossfs_release(path=%s)", path);
-  if (fi->fh == 0) return -EIO;
-  object = (OssObject*)GINT_TO_POINTER(fi->fh);
-  if (cache_contains(object->key)) {
-    cache_remove(object->key);
+  if (fi->fh == 0) {
+    g_warning("file handle is NULL");
+    return -EIO;
+  }
+  object = (OssObject*)(GINT_TO_POINTER(fi->fh));
+  if (object == NULL || object->content == NULL) {
+    g_warning("file handle type is not an OssObject");
+    return -EIO;
+  }
+  if ((fi->flags & O_RDWR) || (fi->flags & O_WRONLY)) {
+    memset(&stbuf, 0, sizeof(struct stat));
+    fd = fileno(object->content);
+    if (fd == -1) {
+      g_warning("get file descriptor failed, errno=%d, strerror=%s", errno, g_strerror(errno));
+      oss_object_destroy(object);
+      return -errno;
+    }
+    if (fstat(fd, &stbuf) == -1) {
+      g_warning("fstat current content file failed, code=%d, message=%s", errno, g_strerror(errno));
+      oss_object_destroy(object);
+      return -errno;
+    }
+    if (stbuf.st_size != object->size) {/*TODO consider mtime? */
+      error = NULL;
+      res = oss_object_put(service, object, &error);
+      if (res) {
+	g_warning("release failed, code=%d, message=%s", error->code, error->message);
+	if (error->code == OSS_ERROR_NO_SUCH_BUCKET) res = -ENOENT;
+	else if (error->code == OSS_ERROR_ACCESS_DENIED) res = -EACCES;
+	else if (error->code == OSS_ERROR_INVALID_OBJECT_NAME) res = -ENAMETOOLONG;
+	else res = -EIO;
+
+	g_error_free(error);
+	oss_object_destroy(object);
+	return res;
+      }
+
+      if (cache_contains(object->key)) {
+	cache_remove(object->key);
+      }
+    }
   }
   oss_object_destroy(object);
   return 0;

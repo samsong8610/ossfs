@@ -167,7 +167,7 @@ gint http_client_head(HttpClient *client, const gchar *path, GHashTable *header,
   curl_easy_setopt(handle, CURLOPT_HEADERDATA, context);
   
   r = do_request(handle, client->error_message);
-  if (r) {
+  if (r != 200) {
     g_debug("Perform curl HEAD operation failed: %s", client->error_message);
     set_error(client, error);
 
@@ -180,7 +180,7 @@ gint http_client_head(HttpClient *client, const gchar *path, GHashTable *header,
   g_free(context);
   g_free(url);
   handle_destroy(handle);
-  return 0;
+  return r;
 }
 
 gint http_client_get(HttpClient *client, const gchar *path, GHashTable *header, GHashTable *resp_header, HttpWriteFunc writer, gpointer user_data, GError **error)
@@ -216,25 +216,23 @@ gint http_client_get(HttpClient *client, const gchar *path, GHashTable *header, 
   r = do_request(handle, client->error_message);
   g_free(context);
 
-  if (r) {
+  if (r != 200) {
     g_debug("Perform curl GET operation failed: %s", client->error_message);
     set_error(client, error);
 
-    g_free(url);
-    handle_destroy(handle);
-    return r;
-  }
-  long code;
-  curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &code);
-  if (code != HTTP_STATUS_CODE_OK) {
-    g_free(url);
-    handle_destroy(handle);
-    return -1;
+  } else {
+    long code;
+    curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &code);
+    if (code != HTTP_STATUS_CODE_OK) {
+      g_free(url);
+      handle_destroy(handle);
+      return -1;
+    }
   }
 
   g_free(url);
   handle_destroy(handle);
-  return 0;
+  return r;
 }
 
 gint http_client_put(HttpClient *client, const gchar *path, GHashTable *header, GHashTable *resp_header, HttpReadFunc reader, gpointer read_data, HttpWriteFunc writer, gpointer write_data, GError **error)
@@ -282,7 +280,7 @@ gint http_client_put(HttpClient *client, const gchar *path, GHashTable *header, 
   curl_easy_setopt(handle, CURLOPT_WRITEDATA, write_data);
 
   r = do_request(handle, client->error_message);
-  if (r) {
+  if (r != 200) {
     g_debug("Perform curl PUT operation failed: %s", client->error_message);
     set_error(client, error);
 
@@ -295,7 +293,7 @@ gint http_client_put(HttpClient *client, const gchar *path, GHashTable *header, 
   g_free(context);
   g_free(url);
   handle_destroy(handle);
-  return 0;
+  return r;
 }
 
 gint http_client_delete(HttpClient *client, const gchar *path, GHashTable *header, GHashTable *resp_header, HttpWriteFunc writer, gpointer write_data, GError **error)
@@ -331,7 +329,7 @@ gint http_client_delete(HttpClient *client, const gchar *path, GHashTable *heade
   r = do_request(handle, client->error_message);
   g_free(context);
 
-  if (r) {
+  if (r != 200) {
     g_debug("Perform curl DELETE operation failed: %s", client->error_message);
     set_error(client, error);
 
@@ -342,7 +340,7 @@ gint http_client_delete(HttpClient *client, const gchar *path, GHashTable *heade
 
   g_free(url);
   handle_destroy(handle);
-  return 0;
+  return r;
 }
 
 gint http_client_post(HttpClient *client, const gchar *path, GHashTable *header, GHashTable *resp_header, HttpReadFunc reader, gpointer read_data, HttpWriteFunc writer, gpointer write_data, GError **error)
@@ -393,7 +391,7 @@ gint http_client_post(HttpClient *client, const gchar *path, GHashTable *header,
   curl_easy_setopt(handle, CURLOPT_WRITEDATA, write_data);
 
   r = do_request(handle, client->error_message);
-  if (r) {
+  if (r != 200) {
     g_debug("Perform curl POST operation failed: %s", client->error_message);
     set_error(client, error);
 
@@ -406,7 +404,7 @@ gint http_client_post(HttpClient *client, const gchar *path, GHashTable *header,
   g_free(context);
   g_free(url);
   handle_destroy(handle);
-  return 0;
+  return r;
 }
 
 static gint do_request(CURL *handle, gchar *message)
